@@ -15,29 +15,32 @@ const results = []; const ok = (name, pass, info) => { results.push({ name, pass
   await page.waitForFunction(() => window.BusJam, null, { timeout: 30000 });
   await sleep(1200);
   await page.screenshot({ path: OUT + 'screenshot-title.png' });
+  // headless Chromium renders with a slow software GPU, so run the game clock faster (animation timing only)
+  await page.evaluate(() => BusJam.setSpeed(8));
   const cdp = await ctx.newCDPSession(page);
   const touch = async (x, y) => { await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] }); await sleep(50); await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); };
   const touchVehicle = async vid => { const p = await page.evaluate(v => BusJam.screenOf(v), vid); await touch(p.x, p.y); };
-  const waitIdle = async (ms = 30000) => page.waitForFunction(() => BusJam.isIdle(), null, { timeout: ms });
+  const waitIdle = async (ms = 120000) => page.waitForFunction(() => BusJam.isIdle(), null, { timeout: ms });
 
   await page.tap('#btn-play'); await sleep(800);
   ok('play opens level 1', await page.evaluate(() => BusJam.mode === 'play' && document.getElementById('hud-level').textContent === 'Level 1'));
   const meta = await page.evaluate(() => ({ spots: BusJam.state.parked.length, vp: [innerWidth, innerHeight], pinch: document.querySelector('meta[name=viewport]').content }));
   ok('8 spots, all open', meta.spots === 8, meta);
   const sol1 = await page.evaluate(() => BusJam.solve().solution);
-  const peopleBefore = await page.evaluate(() => BusJam.visiblePeople());
+  const peopleBefore = await page.evaluate(() => BusJam.waitingRiders());
   await touchVehicle(sol1[0]); await sleep(300);
   const s1 = await page.evaluate(v => ({ moves: BusJam.state.moves, gone: !BusJam.state.inLot[v] }), sol1[0]);
   ok('touch tap drives a vehicle out', s1.moves === 1 && s1.gone, s1);
   await waitIdle();
-  const s2 = await page.evaluate(() => ({ qi: BusJam.state.qi, people: BusJam.visiblePeople() }));
+  const s2 = await page.evaluate(() => ({ qi: BusJam.state.qi, people: BusJam.waitingRiders(), seatsLeftBadge: BusJam.state.parked.filter(Boolean).length }));
   ok('passengers boarded', s2.qi > 0 && s2.people < peopleBefore, { before: peopleBefore, ...s2 });
   // blocked vehicle does nothing
   const blocked = await page.evaluate(() => { const s = BusJam.state; const f = BusJam.core.freeVehicles(s); const b = s.inLot.findIndex((x, i) => x && !f.includes(i)); return b; });
   if (blocked >= 0) { const m0 = await page.evaluate(() => BusJam.state.moves); await touchVehicle(blocked); await sleep(200); ok('blocked vehicle stays put', await page.evaluate(([v, m0]) => BusJam.state.inLot[v] && BusJam.state.moves === m0, [blocked, m0])); }
   // finish level 1 with touch taps
-  for (const v of sol1.slice(1)) { await touchVehicle(v); await sleep(250); }
-  await page.waitForSelector('#win:not(.hidden)', { timeout: 30000 });
+  for (const v of sol1.slice(1)) { await touchVehicle(v); await sleep(120); }
+  const lv1 = await page.evaluate(() => BusJam.info()); ok('level 1 is a big jam', lv1.vehicles >= 30, lv1);
+  await page.waitForSelector('#win:not(.hidden)', { timeout: 300000 });
   await sleep(500); await page.screenshot({ path: OUT + 'screenshot-win.png' });
   const sv = await page.evaluate(() => BusJam.save());
   ok('level 1 completes, 3 stars saved, level 2 unlocked', sv.stars && sv.stars[0] === 3 && sv.unlocked >= 2, sv);
@@ -54,12 +57,14 @@ const results = []; const ok = (name, pass, info) => { results.push({ name, pass
   ok('restart resets', await page.evaluate(() => BusJam.state.moves === 0 && BusJam.state.qi === 0));
 
   // mid-level screenshot on a big level
-  await page.evaluate(() => BusJam.startLevel(19)); await sleep(700);
+  await page.evaluate(() => BusJam.startLevel(29)); await sleep(700);
   const sol20 = await page.evaluate(() => BusJam.solve().solution);
-  for (const v of sol20.slice(0, 5)) { await touchVehicle(v); await sleep(350); }
-  await sleep(900);
+  await page.evaluate(() => BusJam.setSpeed(3));
+  for (const v of sol20.slice(0, 6)) { await page.evaluate(v => BusJam.tapVehicle(v), v); await sleep(100); }
+  await page.waitForFunction(() => BusJam.walking() >= 6, null, { timeout: 120000, polling: 50 }).catch(() => {});
   await page.screenshot({ path: OUT + 'screenshot-midlevel.png' });
-  await waitIdle(); await sleep(300);
+  await page.evaluate(() => BusJam.setSpeed(8));
+  await waitIdle(120000); await sleep(300);
   await page.screenshot({ path: OUT + 'screenshot-midlevel-parked.png' });
 
   // stuck -> shuffle rescue, on the hardest level: find a tap sequence that gets stuck
@@ -71,18 +76,18 @@ const results = []; const ok = (name, pass, info) => { results.push({ name, pass
     return null;
   });
   ok('found a losing tap sequence on level 36', !!seq, seq && seq.length);
-  for (const v of seq) { await page.evaluate(v => BusJam.tapVehicle(v), v); await sleep(120); }
-  await waitIdle(60000); await sleep(400);
+  for (const v of seq) { await page.evaluate(v => BusJam.tapVehicle(v), v); await sleep(60); }
+  await waitIdle(180000); await sleep(400);
   const stuckVisible = await page.isVisible('#stuck');
   ok('stuck panel offers shuffle (no game over)', stuckVisible && await page.evaluate(() => BusJam.core.isStuck(BusJam.state) && BusJam.mode === 'play'));
   await page.screenshot({ path: OUT + 'screenshot-stuck.png' });
   await page.tap('#stuck-shuffle'); await sleep(300);
   const rescue = await page.evaluate(() => { const r = BusJam.solve(true); return { stuck: BusJam.core.isStuck(BusJam.state), solvable: !!r.solution, sol: r.solution, shuffles: BusJam.state.shuffles }; });
   ok('shuffle rescues the stuck position (solver finds a win from here)', !rescue.stuck && rescue.solvable, { shuffles: rescue.shuffles, steps: rescue.sol && rescue.sol.length });
-  await waitIdle(60000);
+  await waitIdle(180000);
   await page.screenshot({ path: OUT + 'screenshot-after-shuffle.png' });
-  for (const v of rescue.sol) { await page.evaluate(v => BusJam.tapVehicle(v), v); await sleep(120); }
-  await page.waitForSelector('#win:not(.hidden)', { timeout: 90000 });
+  for (const v of rescue.sol) { await page.evaluate(v => BusJam.tapVehicle(v), v); await sleep(60); }
+  await page.waitForSelector('#win:not(.hidden)', { timeout: 400000 });
   const sv36 = await page.evaluate(() => BusJam.save());
   ok('finished level 36 after shuffle, 2 stars', sv36.stars[35] === 2, sv36.stars[35]);
 
