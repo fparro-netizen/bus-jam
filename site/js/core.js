@@ -54,7 +54,7 @@ export function grid(s) {
 export function firstBlocker(s, vid, g = grid(s)) {
   const v = s.level.vehicles[vid]; const { w, h } = s.level; const [dx, dy] = DIRS[v.dir];
   let x = v.x + dx, y = v.y + dy;
-  while (x >= 0 && y >= 0 && x < w && y < h) { const c = g[y * w + x]; if (c !== -1) return c === -2 ? -2 - 1000 * 0 : c; x += dx; y += dy; }
+  while (x >= 0 && y >= 0 && x < w && y < h) { const c = g[y * w + x]; if (c !== -1) return c; x += dx; y += dy; }
   return -1;
 }
 export function isFree(s, vid, g) { return s.inLot[vid] && firstBlocker(s, vid, g) === -1; }
@@ -136,7 +136,7 @@ export function shuffle(s, seed) {
   const groups = {};
   s.inLot.forEach((x, i) => { if (x) (groups[seatsOf(s, i)] ||= []).push(i); });
   for (const k in groups) { const ids = groups[k]; const cols = shuffleArr(R, ids.map(i => s.colors[i])); ids.forEach((i, j) => { s.colors[i] = cols[j]; }); }
-  const rest = planQueue(s, R, 4, 1, 3);
+  const rest = planQueue(s, R, 4, 2, 6);
   s.queue = s.queue.slice(0, s.qi).concat(rest);
   s.shuffles++; s.boosters++;
   const events = []; resolve(s, events); return events;
@@ -208,7 +208,7 @@ export function generate(cfg, seed) {
     }
     const vehicles = []; let tries = 0;
     const totalW = cfg.lens.reduce((a, l) => a + l[2], 0);
-    while (vehicles.length < cfg.veh && tries++ < 6000) {
+    while (vehicles.length < cfg.veh && tries++ < 20000) {
       let r = R() * totalW, L = cfg.lens[0]; for (const l of cfg.lens) { if ((r -= l[2]) <= 0) { L = l; break; } }
       const dir = pick(R, DIRKEYS); const v = { x: ri(R, 0, w - 1), y: ri(R, 0, h - 1), dir, len: L[0], seats: L[1], color: 0 };
       const cs = cellsOf(v);
@@ -221,15 +221,35 @@ export function generate(cfg, seed) {
       for (const [cx, cy] of cs) g[cy * w + cx] = vehicles.length;
       vehicles.push(v);
     }
-    if (vehicles.length < cfg.veh) continue;
+    if (vehicles.length < cfg.veh * (attempt > 40 ? 0.9 : 1)) continue;
     // colours: every colour used at least once
     const k = cfg.colors; const order = shuffleArr(R, vehicles.map((_, i) => i));
     order.forEach((vi, j) => { vehicles[vi].color = j < k ? j : ri(R, 0, k - 1); });
     // put vehicles in reading order for nicer ids
+    if (cfg.mystery) vehicles.forEach(v => { if (R() < cfg.mystery) v.m = 1; });
     const level = { w, h, blockers, vehicles, queue: [] };
     const s = newState(level);
     level.queue = planQueue(s, R, cfg.slots, cfg.gmin, cfg.gmax);
     return level;
   }
   return null;
+}
+// fraction of games won by a simple human-like player: prefers vehicles whose colour is needed soonest in the visible line,
+// with some random mistakes (difficulty estimate)
+export function greedyPlayRate(level, n, R, look = 160, noise = 0.2) {
+  let wins = 0;
+  for (let t = 0; t < n; t++) {
+    const s = newState(level);
+    for (;;) {
+      if (isWon(s)) { wins++; break; } if (isStuck(s)) break;
+      const f = freeVehicles(s); let v;
+      if (R() < noise) v = pick(R, f);
+      else {
+        const vis = s.queue.slice(s.qi, s.qi + look);
+        let best = 1e9; for (const id of f) { const i = vis.indexOf(s.colors[id]); const d = (i < 0 ? 1e6 : i) + R(); if (d < best) { best = d; v = id; } }
+      }
+      tap(s, v);
+    }
+  }
+  return wins / n;
 }

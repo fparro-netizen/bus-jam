@@ -1,5 +1,5 @@
 /* Bus Jam service worker: cache-first offline play. Bump CACHE on every release. */
-var CACHE = 'bus-jam-v1';
+var CACHE = 'bus-jam-v2';
 var ASSETS = ['./', 'index.html', 'style.css', 'manifest.webmanifest', 'js/game.js', 'js/core.js', 'js/levels.js', 'js/lib/three.module.min.js', 'icons/icon.svg'];
 self.addEventListener('install', function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(ASSETS.map(function (u) { return new Request(u, { cache: 'reload' }); })); }).then(function () { return self.skipWaiting(); }));
