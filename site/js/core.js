@@ -1,7 +1,8 @@
 // Bus Jam game rules, level generator, solver and boosters. Pure logic, no DOM: shared by the game and the build/test tools.
+// Riders wait in two lines (the left and right arms of the track). The front rider of EITHER line boards a parked bus of their colour.
 export const SPOTS = 8;
-export const COLORS = ['#ef4444', '#3b82f6', '#22c55e', '#facc15', '#a855f7', '#f97316', '#ec4899', '#14b8c4'];
-export const COLOR_NAMES = ['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'teal'];
+export const COLORS = ['#22c55e', '#facc15', '#3b82f6', '#ec4899', '#a855f7', '#ef4444', '#2b2f3a', '#22d3ee', '#f97316'];
+export const COLOR_NAMES = ['green', 'yellow', 'blue', 'pink', 'purple', 'red', 'black', 'cyan', 'orange'];
 export const DIRS = { N: [0, -1], S: [0, 1], E: [1, 0], W: [-1, 0] };
 const DIRKEYS = ['N', 'S', 'E', 'W'];
 
@@ -26,21 +27,18 @@ export function newState(level) {
     level,
     inLot: level.vehicles.map(() => true),
     colors: level.vehicles.map(v => v.color),
-    queue: level.queue.slice(),
-    qi: 0,
+    queues: [level.queues[0].slice(), level.queues[1].slice()],
+    qi: [0, 0],
     parked: new Array(SPOTS).fill(null),
-    moves: 0,
-    boosters: 0,
-    shuffles: 0,
-    sorts: 0,
-    undos: 0,
+    moves: 0, boosters: 0, shuffles: 0, sorts: 0, undos: 0,
   };
 }
+export const waiting = s => s.queues[0].length - s.qi[0] + s.queues[1].length - s.qi[1];
 export function snapshot(s) {
-  return { inLot: s.inLot.slice(), colors: s.colors.slice(), queue: s.queue.slice(), qi: s.qi, parked: s.parked.map(p => p && { vid: p.vid, filled: p.filled }), moves: s.moves };
+  return { inLot: s.inLot.slice(), colors: s.colors.slice(), queues: [s.queues[0].slice(), s.queues[1].slice()], qi: s.qi.slice(), parked: s.parked.map(p => p && { vid: p.vid, filled: p.filled }), moves: s.moves };
 }
 export function restore(s, snap) {
-  s.inLot = snap.inLot.slice(); s.colors = snap.colors.slice(); s.queue = snap.queue.slice(); s.qi = snap.qi;
+  s.inLot = snap.inLot.slice(); s.colors = snap.colors.slice(); s.queues = [snap.queues[0].slice(), snap.queues[1].slice()]; s.qi = snap.qi.slice();
   s.parked = snap.parked.map(p => p && { vid: p.vid, filled: p.filled }); s.moves = snap.moves;
 }
 
@@ -62,16 +60,23 @@ export function freeVehicles(s) { const g = grid(s); const out = []; for (let i 
 export function freeSpot(s) { return s.parked.indexOf(null); }
 export const seatsOf = (s, vid) => s.level.vehicles[vid].seats;
 
-// Board passengers from the front of the queue into parked buses of the same colour (leftmost first).
+function spotFor(s, c) {
+  for (let k = 0; k < SPOTS; k++) { const p = s.parked[k]; if (p && s.colors[p.vid] === c && p.filled < seatsOf(s, p.vid)) return k; }
+  return -1;
+}
+// Board riders from the front of either line into parked buses of the same colour (leftmost bus first).
 function resolve(s, events) {
-  while (s.qi < s.queue.length) {
-    const c = s.queue[s.qi]; let spot = -1;
-    for (let k = 0; k < SPOTS; k++) { const p = s.parked[k]; if (p && s.colors[p.vid] === c && p.filled < seatsOf(s, p.vid)) { spot = k; break; } }
-    if (spot < 0) break;
-    const p = s.parked[spot]; p.filled++;
-    events && events.push({ type: 'board', pid: s.qi, color: c, vid: p.vid, spot, filled: p.filled });
-    s.qi++;
-    if (p.filled >= seatsOf(s, p.vid)) { events && events.push({ type: 'depart', vid: p.vid, spot }); s.parked[spot] = null; }
+  for (let moved = true; moved;) {
+    moved = false;
+    for (let a = 0; a < 2; a++) {
+      while (s.qi[a] < s.queues[a].length) {
+        const c = s.queues[a][s.qi[a]]; const spot = spotFor(s, c); if (spot < 0) break;
+        const p = s.parked[spot]; p.filled++; moved = true;
+        events && events.push({ type: 'board', arm: a, idx: s.qi[a], color: c, vid: p.vid, spot, filled: p.filled });
+        s.qi[a]++;
+        if (p.filled >= seatsOf(s, p.vid)) { events && events.push({ type: 'depart', vid: p.vid, spot }); s.parked[spot] = null; }
+      }
+    }
   }
 }
 
@@ -89,86 +94,84 @@ export function tap(s, vid) {
 }
 
 export function isWon(s) { return s.inLot.every(x => !x) && s.parked.every(p => !p); }
-// stuck: not won, and no vehicle can be moved (no free spot or nothing can drive out)
 export function isStuck(s) {
   if (isWon(s)) return false;
   if (freeSpot(s) < 0) return true;
   return freeVehicles(s).length === 0;
 }
 
-// ---------- queue planning (guarantees a solution) ----------
-// From the current position, build an order for the remaining passengers so the level can be finished
-// by driving out vehicles in a valid order while using at most `slots` parking spots at a time.
-export function planQueue(s, R, slots, gmin, gmax) {
-  const lv = s.level; const sim = { level: lv, inLot: s.inLot.slice(), colors: s.colors, parked: [] };
-  const parked = s.parked.filter(Boolean).map(p => ({ vid: p.vid, need: seatsOf(s, p.vid) - p.filled }));
-  const q = [];
-  // first serve the buses that are already parked (interleaved in small groups)
-  while (parked.length) {
-    const p = pick(R, parked); const g = Math.min(p.need, ri(R, gmin, gmax));
-    for (let i = 0; i < g; i++) q.push(s.colors[p.vid]);
-    p.need -= g; if (!p.need) parked.splice(parked.indexOf(p), 1);
-  }
-  const live = [];
+// ---------- line planning (guarantees a solution) ----------
+// From the current position, deal the remaining riders into the two lines so the level can be finished by driving
+// vehicles out in a valid order while using at most `slots` parking spots at a time. Riders come in colour waves.
+export function planQueues(s, R, slots, gmin, gmax) {
+  const lv = s.level; const lot = s.inLot.slice();
+  const q = [[], []]; let arm = R() < 0.5 ? 0 : 1;
+  const emit = (live, c) => {
+    let need = live.filter(p => s.colors[p.vid] === c).reduce((a, p) => a + p.need, 0);
+    let g = Math.min(need, ri(R, gmin, gmax));
+    for (let i = 0; i < g; i++) q[arm].push(c);
+    for (const p of live) { if (!g) break; if (s.colors[p.vid] !== c) continue; const t = Math.min(g, p.need); p.need -= t; g -= t; }
+    for (let i = live.length - 1; i >= 0; i--) if (!live[i].need) live.splice(i, 1);
+    if (R() < 0.7) arm = 1 - arm;
+  };
+  const live = s.parked.filter(Boolean).map(p => ({ vid: p.vid, need: seatsOf(s, p.vid) - p.filled }));
+  while (live.length) emit(live, s.colors[pick(R, live).vid]); // buses already parked are served first
   for (;;) {
-    const lotLeft = sim.inLot.some(Boolean);
+    const lotLeft = lot.some(Boolean);
     if (lotLeft && live.length < slots) {
-      const free = freeVehicles({ level: lv, inLot: sim.inLot });
+      const free = freeVehicles({ level: lv, inLot: lot });
       if (!free.length) throw new Error('layout deadlock');
-      const vid = pick(R, free); sim.inLot[vid] = false; live.push({ vid, need: lv.vehicles[vid].seats });
+      const vid = pick(R, free); lot[vid] = false; live.push({ vid, need: lv.vehicles[vid].seats });
       continue;
     }
     if (!live.length) break;
-    // prefer older buses a bit so the line feels natural
-    const p = R() < 0.55 ? live[0] : pick(R, live);
-    const g = Math.min(p.need, ri(R, gmin, gmax));
-    for (let i = 0; i < g; i++) q.push(s.colors[p.vid]);
-    p.need -= g; if (!p.need) live.splice(live.indexOf(p), 1);
+    emit(live, s.colors[(R() < 0.55 ? live[0] : pick(R, live)).vid]);
   }
   return q;
 }
 
 // ---------- boosters ----------
-// Shuffle: swap colours between vehicles still in the lot that have the same seat count (so passenger totals still match),
-// then re-deal the waiting passengers into an order that is guaranteed solvable from here.
+// Shuffle: swap colours between vehicles still in the lot that have the same seat count (so rider totals still match),
+// then re-deal the waiting riders into lines that are guaranteed solvable from here.
 export function shuffle(s, seed) {
   const R = rng(seed);
   const groups = {};
   s.inLot.forEach((x, i) => { if (x) (groups[seatsOf(s, i)] ||= []).push(i); });
   for (const k in groups) { const ids = groups[k]; const cols = shuffleArr(R, ids.map(i => s.colors[i])); ids.forEach((i, j) => { s.colors[i] = cols[j]; }); }
-  const rest = planQueue(s, R, 4, 2, 6);
-  s.queue = s.queue.slice(0, s.qi).concat(rest);
+  const rest = planQueues(s, R, 4, 4, 16);
+  for (let a = 0; a < 2; a++) s.queues[a] = s.queues[a].slice(0, s.qi[a]).concat(rest[a]);
   s.shuffles++; s.boosters++;
   const events = []; resolve(s, events); return events;
 }
-// Sort: move waiting passengers whose colour matches an empty seat in a parked bus to the front of the line.
+// Sort: move waiting riders whose colour matches an empty seat in a parked bus to the front of their line.
 export function sortQueue(s) {
   const need = {};
   s.parked.forEach(p => { if (p) need[s.colors[p.vid]] = (need[s.colors[p.vid]] || 0) + seatsOf(s, p.vid) - p.filled; });
-  const rest = s.queue.slice(s.qi); const front = [], back = [];
-  for (const c of rest) { if (need[c] > 0) { front.push(c); need[c]--; } else back.push(c); }
-  s.queue = s.queue.slice(0, s.qi).concat(front, back);
+  for (let a = 0; a < 2; a++) {
+    const rest = s.queues[a].slice(s.qi[a]); const front = [], back = [];
+    for (const c of rest) { if (need[c] > 0) { front.push(c); need[c]--; } else back.push(c); }
+    s.queues[a] = s.queues[a].slice(0, s.qi[a]).concat(front, back);
+  }
   s.sorts++; s.boosters++;
   const events = []; resolve(s, events); return events;
 }
 export function canSort(s) {
-  const rest = s.queue.slice(s.qi); if (!rest.length) return false;
   const need = {}; s.parked.forEach(p => { if (p) need[s.colors[p.vid]] = 1; });
-  return rest.some(c => need[c]);
+  return [0, 1].some(a => s.queues[a].slice(s.qi[a]).some(c => need[c]));
 }
 
 // ---------- solver ----------
 function key(s) {
   let k = ''; for (let i = 0; i < s.inLot.length; i++) k += s.inLot[i] ? '1' : '0';
-  k += '|' + s.qi + '|'; for (const p of s.parked) k += p ? p.vid + ':' + p.filled + ',' : '-,';
+  k += '|' + s.qi[0] + ',' + s.qi[1] + '|'; for (const p of s.parked) k += p ? p.vid + ':' + p.filled + ',' : '-,';
   return k;
 }
-function clone(s) { return { level: s.level, inLot: s.inLot.slice(), colors: s.colors, queue: s.queue, qi: s.qi, parked: s.parked.map(p => p && { vid: p.vid, filled: p.filled }), moves: s.moves }; }
+function clone(s) { return { level: s.level, inLot: s.inLot.slice(), colors: s.colors, queues: s.queues, qi: s.qi.slice(), parked: s.parked.map(p => p && { vid: p.vid, filled: p.filled }), moves: s.moves }; }
+const nextUse = (s, c) => { let best = 1e9; for (let a = 0; a < 2; a++) { const i = s.queues[a].indexOf(c, s.qi[a]); if (i >= 0) best = Math.min(best, i - s.qi[a]); } return best; };
 // Depth-first search over tap orders. Returns the list of vehicle ids to tap, or null.
 export function solve(level, maxNodes = 300000, startState) {
   const s0 = startState ? clone(startState) : newState(level);
   const seen = new Set(); let nodes = 0;
-  const nextUse = (s, c) => { const i = s.queue.indexOf(c, s.qi); return i < 0 ? 1e9 : i - s.qi; };
   function dfs(s, path) {
     if (isWon(s)) return path;
     if (++nodes > maxNodes) return undefined;
@@ -186,18 +189,33 @@ export function solve(level, maxNodes = 300000, startState) {
   const r = dfs(s0, []);
   return { solution: r || null, nodes, aborted: r === undefined };
 }
-// fraction of random tap sequences that clear the level (difficulty estimate)
 export function randomPlayRate(level, n, R) {
   let wins = 0;
   for (let t = 0; t < n; t++) {
     const s = newState(level);
-    for (;;) { if (isWon(s)) { wins++; break; } if (isStuck(s)) break; const f = freeVehicles(s); tap(s, pick(R, f)); }
+    for (;;) { if (isWon(s)) { wins++; break; } if (isStuck(s)) break; tap(s, pick(R, freeVehicles(s))); }
+  }
+  return wins / n;
+}
+// fraction of games won by a simple human-like player: prefers vehicles whose colour is needed soonest in the visible lines,
+// with some random mistakes (difficulty estimate)
+export function greedyPlayRate(level, n, R, look = 130, noise = 0.2) {
+  let wins = 0;
+  for (let t = 0; t < n; t++) {
+    const s = newState(level);
+    for (;;) {
+      if (isWon(s)) { wins++; break; } if (isStuck(s)) break;
+      const f = freeVehicles(s); let v;
+      if (R() < noise) v = pick(R, f);
+      else { let best = 1e9; for (const id of f) { const d = Math.min(nextUse(s, s.colors[id]), look * 10) + R(); if (d < best) { best = d; v = id; } } }
+      tap(s, v);
+    }
   }
   return wins / n;
 }
 
 // ---------- generator ----------
-// cfg: {w,h,veh,colors,lens:[[len,seats,weight]...],cones,slots,gmin,gmax}
+// cfg: {w,h,veh,colors,lens:[[len,seats,weight]...],cones,mystery,slots,gmin,gmax}
 export function generate(cfg, seed) {
   const R = rng(seed); const { w, h } = cfg;
   for (let attempt = 0; attempt < 400; attempt++) {
@@ -213,43 +231,21 @@ export function generate(cfg, seed) {
       const dir = pick(R, DIRKEYS); const v = { x: ri(R, 0, w - 1), y: ri(R, 0, h - 1), dir, len: L[0], seats: L[1], color: 0 };
       const cs = cellsOf(v);
       if (cs.some(([x, y]) => x < 0 || y < 0 || x >= w || y >= h || g[y * w + x] !== -1)) continue;
-      // path to the edge must be clear right now (this keeps the jam always solvable: last placed leaves first)
+      // its path to the edge must be clear right now: the last vehicle placed can always leave first, so no deadlocks
       const [dx, dy] = DIRS[dir]; let x = v.x + dx, y = v.y + dy, ok = true;
       while (x >= 0 && y >= 0 && x < w && y < h) { if (g[y * w + x] !== -1) { ok = false; break; } x += dx; y += dy; }
       if (!ok) continue;
-      // avoid a vehicle driving straight into a head-on vehicle sharing its lane (looks silly)
       for (const [cx, cy] of cs) g[cy * w + cx] = vehicles.length;
       vehicles.push(v);
     }
     if (vehicles.length < cfg.veh * (attempt > 40 ? 0.9 : 1)) continue;
-    // colours: every colour used at least once
+    // colours: every colour used, spread evenly
     const k = cfg.colors; const order = shuffleArr(R, vehicles.map((_, i) => i));
-    order.forEach((vi, j) => { vehicles[vi].color = j < k ? j : ri(R, 0, k - 1); });
-    // put vehicles in reading order for nicer ids
+    order.forEach((vi, j) => { vehicles[vi].color = j % k; });
     if (cfg.mystery) vehicles.forEach(v => { if (R() < cfg.mystery) v.m = 1; });
-    const level = { w, h, blockers, vehicles, queue: [] };
-    const s = newState(level);
-    level.queue = planQueue(s, R, cfg.slots, cfg.gmin, cfg.gmax);
+    const level = { w, h, blockers, vehicles, queues: [[], []] };
+    level.queues = planQueues(newState(level), R, cfg.slots, cfg.gmin, cfg.gmax);
     return level;
   }
   return null;
-}
-// fraction of games won by a simple human-like player: prefers vehicles whose colour is needed soonest in the visible line,
-// with some random mistakes (difficulty estimate)
-export function greedyPlayRate(level, n, R, look = 160, noise = 0.2) {
-  let wins = 0;
-  for (let t = 0; t < n; t++) {
-    const s = newState(level);
-    for (;;) {
-      if (isWon(s)) { wins++; break; } if (isStuck(s)) break;
-      const f = freeVehicles(s); let v;
-      if (R() < noise) v = pick(R, f);
-      else {
-        const vis = s.queue.slice(s.qi, s.qi + look);
-        let best = 1e9; for (const id of f) { const i = vis.indexOf(s.colors[id]); const d = (i < 0 ? 1e6 : i) + R(); if (d < best) { best = d; v = id; } }
-      }
-      tap(s, v);
-    }
-  }
-  return wins / n;
 }

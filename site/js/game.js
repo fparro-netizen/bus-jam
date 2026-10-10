@@ -13,7 +13,7 @@ const SPOT_W = 1.25, SPOT_N = -7.0, SPOT_S = -4.2, ROAD_Z = -3.65, PS = 0.95;
 // jam
 const JAM_TOP = -2.3, JAM_W = 11.8, THETA = Math.PI / 4;
 const SPEED = 16, WALK = 9, STAGGER = 0.04;
-const CHARCOAL = '#2f3542';
+const MYSTERY = '#c5cbd4';
 
 // ---------------- save ----------------
 const SAVE_KEY = 'busjam:v2';
@@ -84,7 +84,7 @@ function canvasTex(w, h, draw) { const c = document.createElement('canvas'); c.w
 const unitBox = new THREE.BoxGeometry(1, 1, 1);
 const arrowShape = new THREE.Shape(); arrowShape.moveTo(0, 0.34); arrowShape.lineTo(0.24, 0.06); arrowShape.lineTo(0.1, 0.06); arrowShape.lineTo(0.1, -0.3); arrowShape.lineTo(-0.1, -0.3); arrowShape.lineTo(-0.1, 0.06); arrowShape.lineTo(-0.24, 0.06); arrowShape.closePath();
 const arrowGeo = new THREE.ShapeGeometry(arrowShape).rotateX(-Math.PI / 2);
-const qTex = canvasTex(64, 64, (x, w, h) => { x.fillStyle = '#ffffff'; x.font = '900 56px -apple-system, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('?', w / 2, h / 2 + 3); });
+const qTex = canvasTex(64, 64, (x, w, h) => { x.fillStyle = '#3a4150'; x.font = '900 56px -apple-system, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('?', w / 2, h / 2 + 3); });
 const IM = {};
 function mkIM(name, geo, mat, n, shadow) { const m = new THREE.InstancedMesh(geo, mat, n); m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.frustumCulled = false; m.castShadow = !!shadow; m.count = 0; scene.add(m); IM[name] = m; m.userData.n = 0; return m; }
 mkIM('body', unitBox, new THREE.MeshLambertMaterial({ color: 0xffffff }), 120, true);
@@ -135,9 +135,11 @@ function trackPoint(s, side, off = 0) { // side -1 left, +1 right; off = lateral
   else { x = side * (TA + TR); z = TM - TR - (s - TA - ARC); nx = side; nz = 0; }
   return [x + nx * off, z + nz * off];
 }
-const SLOTS = [];
-for (let k = 0; ; k++) { const s = 0.2 + k * ROW; if (s > SIDE_LEN + 0.2) break; for (const li of [2, 3, 1, 4, 0]) for (const side of [-1, 1]) SLOTS.push(trackPoint(s, side, LANES[li])); }
-const QVIS = SLOTS.length; const ARM_END = [[-(TA + TR), TTOP - 1.2], [TA + TR, TTOP - 1.2]];
+// Each arm of the track is one line of riders. Rider k of an arm stands k*STEP from the bottom-centre front, in a fixed lane,
+// so when the front rider leaves everyone only steps forward (down the arm, then toward the centre). Nobody changes lane.
+const STEP = ROW / LANES.length, KVIS = Math.floor((SIDE_LEN - 0.1) / STEP);
+const LANE_ORDER = [2, 0, 3, 1, 4];
+function armTarget(arm, k, lane) { const side = arm === 0 ? -1 : 1; return trackPoint(0.3 + Math.min(k, KVIS + 14) * STEP, side, LANES[lane]); }
 
 // ---------------- static world ----------------
 let world = null;
@@ -223,7 +225,7 @@ function setBadge(i, n, color) {
 let levelIdx = 0, state = null, undoStack = [], mode = 'title';
 let CS = 0.7; const lotFrame = new THREE.Object3D(); let lotInv = new THREE.Matrix4();
 let V = [];             // vehicle visuals
-let people = [];        // riders still waiting, in queue order
+let arms = [[], []];    // riders still waiting in each arm of the track, front first
 let walkers = [];
 let sched = [];
 let now = 0;
@@ -236,7 +238,7 @@ const toWorld = (lx, lz) => { tmpP.set(lx, 0, lz).applyMatrix4(lotFrame.matrixWo
 const headingOf = (dx, dz) => Math.atan2(-dx, -dz);
 const parkZ = vid => SPOT_N + 0.12 + model(state.level.vehicles[vid].len, state.level.vehicles[vid].seats).Lm * PS / 2;
 const at = (t, fn) => { sched.push({ t, fn }); };
-const vColor = vid => (state.level.vehicles[vid].m && !revealed[vid]) ? CHARCOAL : C.COLORS[state.colors[vid]];
+const vColor = vid => (state.level.vehicles[vid].m && !revealed[vid]) ? MYSTERY : C.COLORS[state.colors[vid]];
 
 function fillet(pts, r) {
   if (pts.length < 3) return pts;
@@ -294,8 +296,10 @@ function syncScene(pop) {
     setBadge(k, C.seatsOf(state, p.vid) - p.filled, C.COLORS[state.colors[p.vid]]);
   });
   updateReveals(false);
-  const rest = state.queue.slice(state.qi);
-  people = rest.map((c, k) => { const sl = k < QVIS ? SLOTS[k] : ARM_END[k % 2]; return { pid: state.qi + k, color: c, x: sl[0], z: sl[1], s: pop ? 0.01 : 1, born: now + (pop ? Math.min(k, QVIS) * 0.003 : 0) }; });
+  arms = [0, 1].map(a => state.queues[a].slice(state.qi[a]).map((c, k) => {
+    const lane = LANE_ORDER[k % LANE_ORDER.length]; const t = armTarget(a, k, lane);
+    return { pid: a + ':' + (state.qi[a] + k), arm: a, lane, color: c, x: t[0], z: t[1], s: pop ? 0.01 : 1, born: now + (pop ? Math.min(k, KVIS) * 0.004 : 0) };
+  }));
   updateHud();
 }
 function updateReveals(anim) {
@@ -322,11 +326,12 @@ function playEvents(events) {
       vis.lastBoard = Math.max(vis.lastBoard, t + T);
       const n = e.filled, seats = C.seatsOf(state, e.vid), color = C.COLORS[e.color];
       at(t, () => {
-        const i = people.findIndex(p => p.pid === e.pid); const p = i >= 0 ? people.splice(i, 1)[0] : { pid: e.pid, color: e.color, x: MOUTH[0], z: MOUTH[1], s: 1 };
-        walkers.push({ p, pts: [[p.x, p.z], [MOUTH[0], MOUTH[1] - 0.05], mid, door], t0: now, T });
+        const line = arms[e.arm], pid = e.arm + ':' + e.idx; const i = line.findIndex(p => p.pid === pid);
+        const p = i >= 0 ? line.splice(i, 1)[0] : { pid, color: e.color, x: MOUTH[0], z: MOUTH[1], s: 1 };
+        walkers.push({ p, pts: [[p.x, p.z], [MOUTH[0] + (e.arm ? 0.12 : -0.12), MOUTH[1] - 0.05], mid, door], t0: now, T });
         updateHud();
       });
-      at(t + T, () => { walkers = walkers.filter(w => w.p.pid !== e.pid); vis.filled = Math.max(vis.filled, n); vis.squash = now; if (vis.mode === 'parked') setBadge(e.spot, seats - vis.filled, color); Sound.board(n); });
+      at(t + T, () => { walkers = walkers.filter(w => w.p.pid !== e.arm + ':' + e.idx); vis.filled = Math.max(vis.filled, n); vis.squash = now; if (vis.mode === 'parked') setBadge(e.spot, seats - vis.filled, color); Sound.board(n); });
     } else if (e.type === 'depart') {
       const t0 = Math.max(vis.readyAt, vis.lastBoard) + 0.15;
       at(t0, () => { vis.mode = 'depart'; vis.t0 = now; vis.spot = e.spot; setBadge(e.spot, null); Sound.full(); });
@@ -388,20 +393,20 @@ function update(dt) {
 
   // riders
   let n = 0; const lerpK = 1 - Math.exp(-dt * 10);
-  const lim = Math.min(people.length, QVIS + 40);
+  for (let a = 0; a < 2; a++) { const line = arms[a]; const lim = Math.min(line.length, KVIS + 14);
   for (let k = 0; k < lim; k++) {
-    const p = people[k]; const tgt = k < QVIS ? SLOTS[k] : ARM_END[k % 2];
+    const p = line[k]; const tgt = armTarget(a, k, p.lane);
     const dx = tgt[0] - p.x, dz = tgt[1] - p.z; const moving = dx * dx + dz * dz > 0.0004; p.x += dx * lerpK; p.z += dz * lerpK;
     if (p.s < 1 && now > p.born) p.s = Math.min(1, p.s + dt * 6);
-    if (k >= QVIS || n >= MAXP) continue;
-    const bob = moving ? Math.abs(Math.sin(now * 14 + p.pid)) * 0.05 : 0;
+    if (k >= KVIS || n >= MAXP) continue;
+    const bob = moving ? Math.abs(Math.sin(now * 14 + k * 0.9)) * 0.05 : 0;
     setPerson(n++, p.x, bob, p.z, p.color, p.s);
-  }
+  } }
   for (const w of walkers) {
     const k = Math.min(1, (now - w.t0) / w.T); const segs = w.pts; let L = 0; const ls = []; for (let i = 1; i < segs.length; i++) { const l = Math.hypot(segs[i][0] - segs[i - 1][0], segs[i][1] - segs[i - 1][1]); ls.push(l); L += l; }
     let d = L * k, i = 0; while (i < ls.length - 1 && d > ls[i]) { d -= ls[i]; i++; } const f = ls[i] ? Math.min(1, d / ls[i]) : 1;
     const x = segs[i][0] + (segs[i + 1][0] - segs[i][0]) * f, z = segs[i][1] + (segs[i + 1][1] - segs[i][1]) * f;
-    const bob = Math.abs(Math.sin(now * 16 + w.p.pid)) * 0.06; const s = k > 0.9 ? 0.4 + (1 - k) * 6 : 1;
+    const bob = Math.abs(Math.sin(now * 16 + w.t0 * 7)) * 0.06; const s = k > 0.9 ? 0.4 + (1 - k) * 6 : 1;
     if (n < MAXP) setPerson(n++, x, bob, z, w.p.color, s);
   }
   peopleBody.count = n; peopleHead.count = n;
@@ -538,7 +543,7 @@ function updateHud() {
   if (!state) return;
   $('hud-level').textContent = 'Level ' + (levelIdx + 1);
   const left = state.inLot.filter(Boolean).length; $('hud-moves').textContent = left + ' buses left';
-  $('hud-people').textContent = (state.queue.length - state.qi) + ' riders';
+  $('hud-people').textContent = C.waiting(state) + ' riders';
   $('btn-undo').disabled = undoStack.length === 0;
 }
 let toastT = 0;
@@ -596,6 +601,7 @@ window.BusJam = {
   pick: (x, y) => pickVehicle(x, y),
   setSpeed: k => { speed = k; },
   solve: (fromCurrent) => C.solve(state.level, 400000, fromCurrent ? state : undefined),
-  visiblePeople: () => peopleBody.count, waitingRiders: () => people.length, walking: () => walkers.length,
-  info: () => ({ vehicles: state.level.vehicles.length, riders: state.queue.length, drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles }),
+  visiblePeople: () => peopleBody.count, waitingRiders: () => arms[0].length + arms[1].length,
+  riderSamples: (n = 120) => arms.map(line => line.slice(0, n).map(p => ({ pid: p.pid, x: +p.x.toFixed(3), z: +p.z.toFixed(3) }))), walking: () => walkers.length,
+  info: () => ({ vehicles: state.level.vehicles.length, riders: state.queues[0].length + state.queues[1].length, colorsInJam: new Set(state.level.vehicles.map(v => v.color)).size, colorsInRiders: new Set(state.queues[0].concat(state.queues[1])).size, drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles }),
 };
