@@ -1,0 +1,11 @@
+{
+  "name": "bus-jam",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "levels": "node tools/genlevels.mjs",
+    "icons": "node tools/icons.cjs",
+    "test": "node test/e2e.cjs http://127.0.0.1:18791/bus-jam/"
+  },
+  "devDependencies": { "playwright": "^1.48.2", "three": "0.160.0" }
+}
