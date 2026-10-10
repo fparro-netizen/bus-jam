@@ -15,6 +15,7 @@ const results = []; const ok = (name, pass, info) => { results.push({ name, pass
   await page.waitForFunction(() => window.BusJam, null, { timeout: 30000 });
   await sleep(1200);
   await page.screenshot({ path: OUT + 'screenshot-title.png' });
+  await page.evaluate(() => BusJam.startLevel(0)); await sleep(800); await page.screenshot({ path: OUT + 'screenshot-level1-start.png' }); await page.evaluate(() => { document.getElementById('lv-back').click(); });
   // headless Chromium renders with a slow software GPU, so run the game clock faster (animation timing only)
   await page.evaluate(() => BusJam.setSpeed(8));
   const cdp = await ctx.newCDPSession(page);
@@ -26,14 +27,27 @@ const results = []; const ok = (name, pass, info) => { results.push({ name, pass
   ok('play opens level 1', await page.evaluate(() => BusJam.mode === 'play' && document.getElementById('hud-level').textContent === 'Level 1'));
   const meta = await page.evaluate(() => ({ spots: BusJam.state.parked.length, vp: [innerWidth, innerHeight], pinch: document.querySelector('meta[name=viewport]').content }));
   ok('8 spots, all open', meta.spots === 8, meta);
+  const cinfo = await page.evaluate(() => BusJam.info());
+  ok('level 1 starts with all 9 colours in the jam and in the rider lines', cinfo.colorsInJam === 9 && cinfo.colorsInRiders === 9, cinfo);
   const sol1 = await page.evaluate(() => BusJam.solve().solution);
   const peopleBefore = await page.evaluate(() => BusJam.waitingRiders());
-  await touchVehicle(sol1[0]); await sleep(300);
+  // rider flow: sample every rider at real speed before/while the first bus loads; each sample-to-sample step must be forward only
+  await page.evaluate(() => BusJam.setSpeed(1));
+  const frames = [await page.evaluate(() => BusJam.riderSamples(400))];
+  await touchVehicle(sol1[0]);
+  for (let i = 0; i < 40; i++) { await sleep(120); frames.push(await page.evaluate(() => BusJam.riderSamples(400))); }
+  await page.evaluate(() => BusJam.setSpeed(8)); await sleep(300);
+  let down = 0, toward = 0, bad = 0, checked = 0; const badEx = [];
+  for (let f = 1; f < frames.length; f++) for (let a = 0; a < 2; a++) { const mb = new Map(frames[f][a].map(p => [p.pid, p])); for (const p of frames[f - 1][a]) { const q = mb.get(p.pid); if (!q) continue; checked++;
+    const dx = q.x - p.x, dz = q.z - p.z; const onArm = p.z < -10.7 && q.z < -10.7;
+    if (onArm) { if (dz > 0.005) down++; if (dz < -0.005 || Math.abs(dx) > 0.01) { bad++; badEx.push([p, q]); } }
+    else { if (Math.abs(q.x) < Math.abs(p.x) - 0.005) toward++; if (Math.abs(q.x) > Math.abs(p.x) + 0.01) { bad++; badEx.push([p, q]); } } } }
+  ok('riders flow down the arms toward the exit, no sideways/backward/spinning moves', down > 50 && bad === 0, { samples: frames.length, checked, movedDown: down, movedToCentre: toward, bad, ex: badEx.slice(0, 2) });
   const s1 = await page.evaluate(v => ({ moves: BusJam.state.moves, gone: !BusJam.state.inLot[v] }), sol1[0]);
   ok('touch tap drives a vehicle out', s1.moves === 1 && s1.gone, s1);
   await waitIdle();
   const s2 = await page.evaluate(() => ({ qi: BusJam.state.qi, people: BusJam.waitingRiders(), seatsLeftBadge: BusJam.state.parked.filter(Boolean).length }));
-  ok('passengers boarded', s2.qi > 0 && s2.people < peopleBefore, { before: peopleBefore, ...s2 });
+  ok('passengers boarded', s2.qi[0] + s2.qi[1] > 0 && s2.people < peopleBefore, { before: peopleBefore, ...s2 });
   // blocked vehicle does nothing
   const blocked = await page.evaluate(() => { const s = BusJam.state; const f = BusJam.core.freeVehicles(s); const b = s.inLot.findIndex((x, i) => x && !f.includes(i)); return b; });
   if (blocked >= 0) { const m0 = await page.evaluate(() => BusJam.state.moves); await touchVehicle(blocked); await sleep(200); ok('blocked vehicle stays put', await page.evaluate(([v, m0]) => BusJam.state.inLot[v] && BusJam.state.moves === m0, [blocked, m0])); }
@@ -54,7 +68,7 @@ const results = []; const ok = (name, pass, info) => { results.push({ name, pass
   const after = await page.evaluate(() => JSON.stringify([BusJam.state.inLot, BusJam.state.qi, BusJam.state.parked]));
   ok('undo restores the position', before === after);
   await page.tap('#btn-restart'); await sleep(300);
-  ok('restart resets', await page.evaluate(() => BusJam.state.moves === 0 && BusJam.state.qi === 0));
+  ok('restart resets', await page.evaluate(() => BusJam.state.moves === 0 && BusJam.state.qi[0] + BusJam.state.qi[1] === 0));
 
   // mid-level screenshot on a big level
   await page.evaluate(() => BusJam.startLevel(29)); await sleep(700);
@@ -96,8 +110,8 @@ const results = []; const ok = (name, pass, info) => { results.push({ name, pass
   const sortRes = await page.evaluate(async () => {
     const C = BusJam.core; const s = BusJam.state;
     // park vehicles until the front of the line doesn't match but someone further back does
-    for (let k = 0; k < 6; k++) { const f = C.freeVehicles(s); if (!f.length || C.freeSpot(s) < 0) break; if (C.canSort(s) && !s.parked.some(p => p && s.colors[p.vid] === s.queue[s.qi])) break; BusJam.tapVehicle(f[f.length - 1]); }
-    const can = C.canSort(s); const qi0 = s.qi; if (can) BusJam.doSort(); return { can, boarded: s.qi - qi0, sorts: s.sorts };
+    for (let k = 0; k < 6; k++) { const f = C.freeVehicles(s); if (!f.length || C.freeSpot(s) < 0) break; if (C.canSort(s)) break; BusJam.tapVehicle(f[f.length - 1]); }
+    const can = C.canSort(s); const qi0 = s.qi[0] + s.qi[1]; if (can) BusJam.doSort(); return { can, boarded: s.qi[0] + s.qi[1] - qi0, sorts: s.sorts };
   });
   ok('sort booster moves matching passengers forward', !sortRes.can || sortRes.boarded > 0, sortRes);
 
