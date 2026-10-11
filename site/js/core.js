@@ -8,7 +8,9 @@
 // The micro simulation (step) is what the game runs; the solver uses an exact "macro" model of where the micro simulation
 // settles after each tap (ring order doesn't matter for that, only the colour counts and the stream merge order do).
 export const SPOTS = 8;
-export const COLORS = ['#22c55e', '#facc15', '#3b82f6', '#ec4899', '#a855f7', '#ef4444', '#2b2f3a', '#22d3ee', '#f97316'];
+// v6 palette, tuned on the rendered (lit) colours: every pair is >= 21 CIEDE2000 apart on bus roofs, sides, riders and heads
+// (tools/de2000.py). Red, orange and pink in particular are pulled well apart.
+export const COLORS = ['#1FAA3A', '#FFE11A', '#0A80FF', '#FF8AD8', '#A535EC', '#DC1A22', '#1C1F26', '#21D4F0', '#FF9A0A'];
 export const COLOR_NAMES = ['green', 'yellow', 'blue', 'pink', 'purple', 'red', 'black', 'cyan', 'orange'];
 export const DIRS = { N: [0, -1], S: [0, 1], E: [1, 0], W: [-1, 0] };
 const DIRKEYS = ['N', 'S', 'E', 'W'];

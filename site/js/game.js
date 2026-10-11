@@ -15,7 +15,7 @@ const SPOT_S = -4.2, ROAD_Z = -3.65, PS = 0.95;
 // jam
 const JAM_TOP = -2.3, JAM_W = 11.8, THETA = Math.PI / 4;
 const SPEED = 16, WALK = 6;
-const MYSTERY = '#c5cbd4';
+const MYSTERY = '#D4D7DC';
 
 // ---------------- save ----------------
 const SAVE_KEY = 'busjam:v2';
@@ -125,7 +125,7 @@ const MAXP = 760;
 const peopleBody = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.13, 0.16, 3, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAXP);
 const peopleHead = new THREE.InstancedMesh(new THREE.SphereGeometry(0.115, 10, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAXP);
 for (const m of [peopleBody, peopleHead]) { m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.frustumCulled = false; m.castShadow = true; m.count = 0; for (let i = 0; i < MAXP; i++) m.setColorAt(i, tmpC.set('#ffffff')); scene.add(m); }
-const headColors = C.COLORS.map(h => new THREE.Color(h).lerp(new THREE.Color('#ffffff'), 0.18));
+const headColors = C.COLORS.map(h => new THREE.Color(h).lerp(new THREE.Color('#ffffff'), 0.06)); // only a hint lighter: more white washed red into pink
 
 // dust puffs
 const MAXD = 260;
@@ -217,7 +217,8 @@ function setBadge(i, n, color) {
   x.fillStyle = 'rgba(0,0,0,.25)'; x.beginPath(); x.roundRect(8, 10, 112, 58, 16); x.fill();
   x.fillStyle = color; x.beginPath(); x.roundRect(8, 4, 112, 58, 16); x.fill();
   x.strokeStyle = 'rgba(255,255,255,.9)'; x.lineWidth = 4; x.stroke();
-  x.fillStyle = '#fff'; x.font = '900 40px -apple-system, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(String(n), 64, 35); b.t.needsUpdate = true;
+  const lum = new THREE.Color(color).getHSL({}).l, light = ['#FFE11A', '#21D4F0', '#FF8AD8', '#FF9A0A'].includes(color) || lum > 0.62;
+  x.fillStyle = light ? '#1b1f27' : '#fff'; x.font = '900 40px -apple-system, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(String(n), 64, 35); b.t.needsUpdate = true;
 }
 // ---------------- game state ----------------
 let levelIdx = 0, state = null, undoStack = [], mode = 'title';
@@ -413,7 +414,7 @@ function update(dt) {
     for (const [name, pm] of md.parts) {
       const m = IM[name], i = cnt[name]++; if (i >= m.instanceMatrix.count) continue;
       tmpM2.multiplyMatrices(tmpM, pm); m.setMatrixAt(i, tmpM2);
-      if (name === 'body') m.setColorAt(i, tmpC.set(col)); else if (name === 'roof') m.setColorAt(i, tmpC.set(col).lerp(WHITE, 0.14));
+      if (name === 'body') m.setColorAt(i, tmpC.set(col)); else if (name === 'roof') m.setColorAt(i, tmpC.set(col).lerp(WHITE, 0.04));
     }
     if (vis.mode === 'parked' || vis.mode === 'depart') {
       const lit = Math.floor(vis.filled / 4); let shown = 0;
