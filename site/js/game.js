@@ -8,7 +8,7 @@ import { LEVELS } from './levels.js';
 const $ = id => document.getElementById(id);
 const { RING, ringPoint, cellU, SPOT_W, SPOT_N } = C;
 const RB = 0.62;                        // half width of the ring floor
-const S_LANES = [-0.54, -0.18, 0.18, 0.54], S_ORDER = [1, 2, 0, 3], SSTEP = C.RING_LEN / RING.rows / S_LANES.length;
+const S_LANES = [-0.54, -0.18, 0.18, 0.54], S_ORDER = [0, 1, 2, 3]; // streams walk in rows of 4 abreast
 const TOP_Z = -15.6;                    // top of the view
 // parking
 const SPOT_S = -4.2, ROAD_Z = -3.65, PS = 0.95;
@@ -94,6 +94,9 @@ mkIM('glass', unitBox, lam('#1f2a3d'), 400, false);
 mkIM('wheel', new THREE.CylinderGeometry(0.15, 0.15, 0.1, 10).rotateZ(Math.PI / 2), lam('#20242c'), 760, false);
 mkIM('arrow', arrowGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), 120, false);
 mkIM('q', new THREE.PlaneGeometry(0.62, 0.62).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: qTex, transparent: true, alphaTest: 0.3, depthWrite: false }), 120, false);
+// seat grid on parked buses' roofs: rows of 4 seats; a boarded row shows 4 rider heads
+mkIM('seat', new THREE.BoxGeometry(0.14, 0.03, 0.13), lam('#2b3240'), 600, false);
+mkIM('head', new THREE.SphereGeometry(0.085, 10, 8), lam('#fff4dc'), 600, false);
 for (const k of ['body', 'roof']) for (let i = 0; i < 120; i++) IM[k].setColorAt(i, tmpC.set('#ffffff'));
 const partM = (x, y, z, sx, sy, sz) => new THREE.Matrix4().compose(new THREE.Vector3(x, y, z), new THREE.Quaternion(), new THREE.Vector3(sx, sy, sz));
 const MODELS = {};
@@ -111,11 +114,14 @@ function model(len, seats) {
   const roofY = 0.12 + H + 0.055, as = len >= 3 ? 1.35 : 1.05;
   const arrow = partM(0, roofY, 0, as, 1, as); const arrowM = partM(0, roofY, -Lm * 0.2, 0.8, 1, 0.8);
   const q = partM(0, roofY + 0.003, Lm * 0.24, 1, 1, 1);
-  return (MODELS[key] = { Lm, parts, arrow, arrowM, q, H });
+  // seat grid: seats/4 rows of 4, front row first (front = -z, toward the ring when parked)
+  const nRows = Math.max(1, Math.round(seats / 4)), mg = 0.16, pitch = (Lm - 2 * mg) / nRows; const seatRows = [];
+  for (let j = 0; j < nRows; j++) { const z = -Lm / 2 + mg + (j + 0.5) * pitch; seatRows.push([0, 1, 2, 3].map(c => [partM((c - 1.5) * 0.17, roofY + 0.015, z, 1, 1, 1), partM((c - 1.5) * 0.17, roofY + 0.07, z, 1, 1, 1)])); }
+  return (MODELS[key] = { Lm, parts, arrow, arrowM, q, H, seatRows });
 }
 
 // ---------------- people (instanced) ----------------
-const MAXP = 520;
+const MAXP = 760;
 const peopleBody = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.13, 0.16, 3, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAXP);
 const peopleHead = new THREE.InstancedMesh(new THREE.SphereGeometry(0.115, 10, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAXP);
 for (const m of [peopleBody, peopleHead]) { m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.frustumCulled = false; m.castShadow = true; m.count = 0; for (let i = 0; i < MAXP; i++) m.setColorAt(i, tmpC.set('#ffffff')); scene.add(m); }
@@ -282,14 +288,14 @@ const streamPaths = [0, 1].map(a => {
   const side = a ? 1 : -1; const P0 = ringPoint(cellU(C.JOIN_CELL[a]), RB - 0.05);
   return mkPath(fillet([[P0[0], P0[1]], [P0[0], -13.3], [side * 4.75, -15.1], [side * 4.75, -24]], 1.1));
 });
-const SVIS = [0, 1].map(a => { let d = 0; while (d < streamPaths[a].len && samplePath(streamPaths[a], d)[1] > TOP_Z - 0.8) d += 0.05; return Math.floor(d / SSTEP); });
+const SVIS = [0, 1].map(a => { let d = 0; while (d < streamPaths[a].len && samplePath(streamPaths[a], d)[1] > TOP_Z - 0.8) d += 0.05; return Math.floor(d / ROWLEN) * 4; });
 function streamTarget(a, k, lane) {
-  const p = streamPaths[a]; const d = 0.12 + Math.min(k, SVIS[a] + 10) * SSTEP; const [x, z, tx, tz] = samplePath(p, d); const l = Math.hypot(tx, tz) || 1;
+  const p = streamPaths[a]; const d = 0.12 + Math.min(Math.floor(k / 4), SVIS[a] / 4 + 3) * ROWLEN; /* row k/4, 4 abreast */ const [x, z, tx, tz] = samplePath(p, d); const l = Math.hypot(tx, tz) || 1;
   return [x + (-tz / l) * S_LANES[lane], z + (tx / l) * S_LANES[lane]];
 }
 
 // ---------------- scene sync ----------------
-let riderSerial = 0;
+let riderSerial = 0, lastSeatLog = [], boardGroups = [];
 function syncScene(pop) {
   walkers = []; sched = []; dust = [];
   const lv = state.level; V = [];
@@ -367,6 +373,7 @@ function spawnDust(x, z, rot, s) {
 // ---------------- per-frame update ----------------
 function tickRules() {
   const ev = C.step(state); if (ev.length) playEvents(ev);
+  const g = {}; for (const e of ev) if (e.type === 'board') g[e.spot] = (g[e.spot] || 0) + 1; for (const k in g) { boardGroups.push(g[k]); if (boardGroups.length > 2000) boardGroups.shift(); }
   if (mode === 'play') {
     if (C.isStuck(state)) { if (++stuckTicks === RING.rows) showStuck(); }  // after one full turn of the ring with nothing to board
     else { if (stuckTicks >= RING.rows) hideOverlay(); stuckTicks = 0; }
@@ -376,7 +383,7 @@ function update(dt) {
   now += dt;
   if (state) { tickAcc += dt * C.TICK_RATE; while (tickAcc >= 1) { tickAcc -= 1; tickRules(); } }
   if (sched.length) { sched.sort((a, b) => a.t - b.t); while (sched.length && sched[0].t <= now) sched.shift().fn(); }
-  const cnt = { body: 0, roof: 0, glass: 0, wheel: 0, arrow: 0, q: 0 };
+  const cnt = { body: 0, roof: 0, glass: 0, wheel: 0, arrow: 0, q: 0, seat: 0, head: 0 }; let seatLog = [];
   for (const vis of V) {
     if (!vis || vis.mode === 'gone') continue;
     const v = state.level.vehicles[vis.vid]; const md = model(v.len, v.seats);
@@ -408,12 +415,21 @@ function update(dt) {
       tmpM2.multiplyMatrices(tmpM, pm); m.setMatrixAt(i, tmpM2);
       if (name === 'body') m.setColorAt(i, tmpC.set(col)); else if (name === 'roof') m.setColorAt(i, tmpC.set(col).lerp(WHITE, 0.14));
     }
+    if (vis.mode === 'parked' || vis.mode === 'depart') {
+      const lit = Math.floor(vis.filled / 4); let shown = 0;
+      md.seatRows.forEach((row, j) => { for (const [seatM, headM] of row) {
+        if (cnt.seat < IM.seat.instanceMatrix.count) { tmpM2.multiplyMatrices(tmpM, seatM); IM.seat.setMatrixAt(cnt.seat++, tmpM2); }
+        if (j < lit && cnt.head < IM.head.instanceMatrix.count) { tmpM2.multiplyMatrices(tmpM, headM); IM.head.setMatrixAt(cnt.head++, tmpM2); shown++; }
+      } });
+      if (vis.mode === 'parked') seatLog.push({ spot: vis.spot, vid: vis.vid, seats: v.seats, rows: md.seatRows.length, filled: vis.filled, litRows: lit, heads: shown });
+    }
     const hidden = v.m && !revealed[vis.vid];
     if (vis.mode === 'lot' || vis.mode === 'waitDrive' || (vis.mode === 'drive' && now - vis.t0 < vis.T * 0.6)) {
       tmpM2.multiplyMatrices(tmpM, hidden ? md.arrowM : md.arrow); IM.arrow.setMatrixAt(cnt.arrow++, tmpM2);
       if (hidden) { tmpM2.multiplyMatrices(tmpM, md.q); IM.q.setMatrixAt(cnt.q++, tmpM2); }
     }
   }
+  lastSeatLog = seatLog;
   for (const k in cnt) { const m = IM[k]; m.count = cnt[k]; m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
 
   // riders: the ring (always circulating), the two streams, and riders walking to their bus
@@ -573,7 +589,7 @@ function startLevel(i) {
   levelIdx = i; save.last = i; persist(); mode = 'play';
   hideOverlay(); show(null); $('hud').classList.remove('hidden'); $('bar').classList.remove('hidden');
   setupLevel(i); fitCamera();
-  const hints = ['Tap a bus with a clear path to park it. Riders circling the ring hop on when they pass a bus of their colour.', 'Gaps in the ring fill from the two streams. Full buses leave and free their spot.', 'Stuck? Shuffle is free, unlimited, and always makes it solvable.'];
+  const hints = ['Tap a bus with a clear path to park it. Riders circle the ring in rows of 4 and hop on a row at a time when they pass a bus of their colour.', 'Gaps in the ring fill from the two streams. Full buses leave and free their spot.', 'Stuck? Shuffle is free, unlimited, and always makes it solvable.'];
   if (i < hints.length) showHint(hints[i]); else hideHint();
 }
 function updateHud() {
@@ -641,6 +657,7 @@ window.BusJam = {
   visiblePeople: () => peopleBody.count, waitingRiders: () => C.waiting(state),
   ringSamples: () => ringVis.map((p, slot) => p && { pid: p.pid, slot, x: +p.x.toFixed(3), z: +p.z.toFixed(3), merging: now - p.mt0 < 0.4 }).filter(Boolean),
   streamSamples: () => streamVis.map(line => line.slice(0, 60).map(p => ({ pid: p.pid, x: +p.x.toFixed(3), z: +p.z.toFixed(3) }))),
+  seatInfo: () => lastSeatLog.slice(), boardGroups: () => boardGroups.slice(), resetBoardGroups: () => { boardGroups = []; },
   walking: () => walkers.length, stuckShown: () => !$('stuck').classList.contains('hidden'),
   ringCentre: [0, RING.cz],
   project: (x, z) => { const p = new THREE.Vector3(x, 0.4, z).project(camera); return { x: (p.x + 1) / 2 * window.innerWidth, y: (1 - p.y) / 2 * window.innerHeight }; },

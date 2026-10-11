@@ -3,6 +3,8 @@
 // Riders: a big closed RING in the middle keeps circulating counter-clockwise (as seen on screen), one row per tick.
 // Two upper STREAMS queue more riders; when an empty place in the ring passes a stream's join point, the stream's front
 // rider steps in. As ring riders pass a parked bus of their colour with free seats, they step off and board it.
+// v5: riders travel in ROWS OF 4 abreast. Every ring row and every stream row is one colour, merges fill a whole empty
+// ring row, and a row boards a parked bus of its colour all together (seat counts are multiples of 4).
 // The micro simulation (step) is what the game runs; the solver uses an exact "macro" model of where the micro simulation
 // settles after each tap (ring order doesn't matter for that, only the colour counts and the stream merge order do).
 export const SPOTS = 8;
@@ -12,8 +14,8 @@ export const DIRS = { N: [0, -1], S: [0, 1], E: [1, 0], W: [-1, 0] };
 const DIRKEYS = ['N', 'S', 'E', 'W'];
 
 // ---------- ring geometry (shared with the renderer; world units, x right, z down the screen) ----------
-export const RING = { a: 2.4, R: 2.0, cz: -10.0, rows: 50, lanes: [-0.38, 0, 0.38] };
-export const LANES_N = RING.lanes.length, CAP = RING.rows * LANES_N;
+export const RING = { a: 2.4, R: 2.0, cz: -10.0, rows: 50, lanes: [-0.45, -0.15, 0.15, 0.45] };
+export const LANES_N = RING.lanes.length, CAP = RING.rows * LANES_N, ROW = LANES_N; // ROW = riders per row (4)
 export const RING_LEN = 4 * RING.a + 2 * Math.PI * RING.R;
 export const TICK_RATE = 6;               // ring rows advanced per second
 export const SPOT_W = 1.25, SPOT_N = -7.0;
@@ -131,19 +133,21 @@ export function step(s) {
   for (let k = 0; k < SPOTS; k++) {
     const p = s.parked[k]; if (!p || p.full || s.tick < p.ready) continue;
     const c = s.colors[p.vid], seats = seatsOf(s, p.vid); const r = ((BOARD_CELL[k] - s.rot) % rows + rows) % rows;
-    for (let l = 0; l < LANES_N && p.filled < seats; l++) {
-      const slot = r * LANES_N + l; if (s.ring[slot] !== c) continue;
-      s.ring[slot] = -1; p.filled++; s.boards++;
-      ev.push({ type: 'board', spot: k, vid: p.vid, slot, color: c, filled: p.filled });
-      if (p.filled >= seats) { p.full = true; p.freeAt = s.tick + DEPART_TICKS; ev.push({ type: 'depart', vid: p.vid, spot: k }); }
-    }
+    // the whole row of 4 steps off together when it's all this bus's colour and the bus has a free row of seats
+    if (seats - p.filled < ROW) continue;
+    let all = true; for (let l = 0; l < LANES_N; l++) if (s.ring[r * LANES_N + l] !== c) { all = false; break; }
+    if (!all) continue;
+    p.filled += ROW; s.boards += ROW; s.rowBoards = (s.rowBoards || 0) + 1;
+    for (let l = 0; l < LANES_N; l++) { const slot = r * LANES_N + l; s.ring[slot] = -1; ev.push({ type: 'board', spot: k, vid: p.vid, slot, color: c, filled: p.filled, lane: l }); }
+    if (p.filled >= seats) { p.full = true; p.freeAt = s.tick + DEPART_TICKS; ev.push({ type: 'depart', vid: p.vid, spot: k }); }
   }
   for (const a of [1, 0]) {
     const r = ((JOIN_CELL[a] - s.rot) % rows + rows) % rows;
-    for (const l of [1, 0, 2]) {
-      const slot = r * LANES_N + l; if (s.ring[slot] !== -1) continue;
-      if (mergeTurn(streamLeft(s, 0), streamLeft(s, 1)) !== a) break;
-      const c = s.streams[a][s.qi[a]]; s.ring[slot] = c; ev.push({ type: 'merge', arm: a, idx: s.qi[a], slot, color: c }); s.qi[a]++; s.merges++;
+    // a whole row of 4 steps into a completely empty ring row
+    let empty = true; for (let l = 0; l < LANES_N; l++) if (s.ring[r * LANES_N + l] !== -1) { empty = false; break; }
+    if (!empty || mergeTurn(streamLeft(s, 0), streamLeft(s, 1)) !== a) continue;
+    for (let l = 0; l < LANES_N; l++) {
+      const slot = r * LANES_N + l; const c = s.streams[a][s.qi[a]]; s.ring[slot] = c; ev.push({ type: 'merge', arm: a, idx: s.qi[a], slot, color: c }); s.qi[a]++; s.merges++;
     }
   }
   return ev;
@@ -176,8 +180,8 @@ export function settle(m) {
     }
     let n = 0; for (const x of m.cnt) n += x; let gaps = CAP - n;
     while (gaps > 0) {
-      const a = mergeTurn(m.streams[0].length - m.qi[0], m.streams[1].length - m.qi[1]); if (a < 0) break;
-      m.cnt[m.streams[a][m.qi[a]++]]++; gaps--; changed = true;
+      const a = mergeTurn(m.streams[0].length - m.qi[0], m.streams[1].length - m.qi[1]); if (a < 0 || gaps < ROW) break;
+      for (let l = 0; l < ROW; l++) m.cnt[m.streams[a][m.qi[a]++]]++; gaps -= ROW; changed = true;
     }
     if (!changed) return m;
   }
@@ -243,7 +247,7 @@ export function planSequence(st, R, slots, gmin, gmax, have = null, focus = 0) {
   const rest = have ? have.slice() : null; // colours already in the ring: counted against needs first
   const emit = (live, c) => {
     let need = live.filter(p => st.colors[p.vid] === c).reduce((a, p) => a + p.need, 0);
-    let g = Math.min(need, ri(R, gmin, gmax)); let fromRing = rest ? Math.min(g, rest[c]) : 0; if (rest) rest[c] -= fromRing;
+    let g = Math.min(need, Math.max(ROW, ROW * Math.round(ri(R, gmin, gmax) / ROW))); /* whole rows of 4 */ let fromRing = rest ? Math.min(g, rest[c]) : 0; if (rest) rest[c] -= fromRing;
     for (let i = fromRing; i < g; i++) seq.push(c);
     for (const p of live) { if (!g) break; if (st.colors[p.vid] !== c) continue; const t = Math.min(g, p.need); p.need -= t; g -= t; }
     for (let i = live.length - 1; i >= 0; i--) if (!live[i].need) live.splice(i, 1);
@@ -268,9 +272,9 @@ export function planSequence(st, R, slots, gmin, gmax, have = null, focus = 0) {
 }
 // split a sequence into its colour blocks and hand the blocks alternately to the two streams
 function dealStreams(seq, R) {
-  const blocks = []; for (const c of seq) { const b = blocks[blocks.length - 1]; if (b && b[0] === c && b.length < 30) b.push(c); else blocks.push([c]); }
+  const blocks = []; for (const c of seq) { const b = blocks[blocks.length - 1]; if (b && b[0] === c && b.length < 24) b.push(c); else blocks.push([c]); }
   const st = [[], []]; let a = R() < 0.5 ? 0 : 1;
-  for (const b of blocks) { st[a].push(...b); if (b.length >= 6 || R() < 0.5) a = 1 - a; }
+  for (const b of blocks) { st[a].push(...b); if (b.length >= 12 || R() < 0.5) a = 1 - a; }
   return st;
 }
 
@@ -291,13 +295,14 @@ export function shuffle(s, seed) {
       setStreams(dealStreams(shuffleArr(R, rest).sort((a, b) => a - b), R));
     } else {
       s.streams = [origStreams[0].slice(0, s.qi[0]), origStreams[1].slice(0, s.qi[1])];
-      const seq = planSequence(s, R, slots, 6, 20); let i = 0;
+      const seq = planSequence(s, R, slots, 12, 24); let i = 0;
       for (let k = 0; k < CAP; k++) if (s.ring[k] >= 0) s.ring[k] = seq[i++];
       const rest = seq.slice(i);
       if (how === 'blocks') setStreams(dealStreams(rest, R));
       else { // exact: the streams will merge in exactly the planned order
         const f = [[], []]; const tot = [Math.floor(rest.length / 2), Math.ceil(rest.length / 2)];
-        for (const c of rest) { const a = mergeTurn(tot[0] - f[0].length, tot[1] - f[1].length); f[a].push(c); }
+        const half = Math.floor(rest.length / ROW / 2) * ROW; tot[0] = half; tot[1] = rest.length - half;
+        for (let i = 0; i < rest.length; i += ROW) { const a = mergeTurn(tot[0] - f[0].length, tot[1] - f[1].length); f[a].push(...rest.slice(i, i + ROW)); }
         setStreams(f);
       }
     }
@@ -318,7 +323,7 @@ export function sortQueue(s) {
   for (const c of s.ring) if (c >= 0 && need[c] > 0) need[c]--;
   for (let a = 0; a < 2; a++) {
     const rest = s.streams[a].slice(s.qi[a]); const front = [], back = [];
-    for (const c of rest) { if (need[c] > 0) { front.push(c); need[c]--; } else back.push(c); }
+    for (let i = 0; i < rest.length; i += ROW) { const row = rest.slice(i, i + ROW), c = row[0]; if (need[c] >= ROW) { front.push(...row); need[c] -= ROW; } else back.push(...row); }
     s.streams[a] = s.streams[a].slice(0, s.qi[a]).concat(front, back);
   }
   s.sorts++; s.boosters++;
@@ -367,7 +372,7 @@ export function generate(cfg, seed) {
     if (cfg.mystery) vehicles.forEach(v => { if (R() < cfg.mystery) v.m = 1; });
     const level = { w, h, shape: cfg.shape || 'diamond', blockers, vehicles, ring: [], streams: [[], []] };
     const seq = planSequence({ level, inLot: vehicles.map(() => true), colors: vehicles.map(v => v.color), parked: [] }, R, cfg.slots, cfg.gmin, cfg.gmax, null, cfg.focus || 0);
-    const ringN = Math.min(CAP, seq.length - 40);
+    const ringN = Math.floor(Math.min(CAP, seq.length - 40) / ROW) * ROW;
     // ring rows are listed so that higher rows are further ahead; the first riders of the plan sit nearest the spots
     const ring = new Array(CAP).fill(-1); const head = seq.slice(0, ringN);
     for (let i = 0; i < ringN; i++) ring[i] = head[i];
