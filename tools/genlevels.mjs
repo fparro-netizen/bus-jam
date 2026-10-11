@@ -20,7 +20,7 @@ function cfgFor(i) {
     colors: 9,
     cones: 0,
     mystery: i >= 6 ? Math.min(0.25, 0.05 + (i - 6) * 0.007) : 0,
-    slots: 3, gmin: 15, gmax: 30,
+    slots: 3, gmin: 12, gmax: 24,
     focus: i < 2 ? 0 : Math.min(0.97, lerp(0.4, 1.05, t)),
     target: lerp(1, 0.15, Math.pow(t, 0.9)),
   };

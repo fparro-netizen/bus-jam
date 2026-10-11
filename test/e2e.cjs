@@ -41,7 +41,7 @@ function motion(frames, cz) {
   const meta = await page.evaluate(() => ({ spots: BusJam.state.parked.length, vp: [innerWidth, innerHeight], pinch: document.querySelector('meta[name=viewport]').content }));
   ok('8 spots, all open', meta.spots === 8, meta);
   const cinfo = await page.evaluate(() => BusJam.info());
-  ok('level 1: big jam, all 9 colours in the jam and among the riders, ring of 80-150 riders', cinfo.vehicles >= 30 && cinfo.colorsInJam === 9 && cinfo.colorsInRiders === 9 && cinfo.ringRiders >= 80 && cinfo.ringRiders <= 150, cinfo);
+  ok('level 1: big jam, all 9 colours in the jam and among the riders, ring of 80-200 riders', cinfo.vehicles >= 30 && cinfo.colorsInJam === 9 && cinfo.colorsInRiders === 9 && cinfo.ringRiders >= 80 && cinfo.ringRiders <= 200, cinfo);
   // ring circulates before anything is tapped
   const idleFrames = await sampleRing(8, 200); const m0 = motion(idleFrames, cz);
   ok('ring circulates counter-clockwise before any tap', m0.framePairs >= 1 && m0.ccw > 100 && m0.cw === 0 && m0.still === 0, m0);
@@ -53,6 +53,14 @@ function motion(frames, cz) {
   const s1 = await page.evaluate(v => ({ moves: BusJam.state.moves, gone: !BusJam.state.inLot[v] }), sol1[0]);
   ok('touch tap drives a vehicle out', s1.moves === 1 && s1.gone, s1);
   for (const v of sol1.slice(1, 4)) await page.evaluate(v => BusJam.tapVehicle(v), v);
+  // v5: watch the parked buses fill: seat grid rows of 4, one row of heads lights up per boarded row
+  const seatSeen = { samples: 0, bad: [], partial: null };
+  for (let i = 0; i < 120 && !seatSeen.partial; i++) {
+    const si = await page.evaluate(() => BusJam.seatInfo()); seatSeen.samples += si.length;
+    for (const b of si) { if (!(b.rows === b.seats / 4 && b.litRows === Math.floor(b.filled / 4) && b.filled % 4 === 0 && b.heads === b.litRows * 4)) seatSeen.bad.push(b); if (b.litRows > 0 && b.litRows < b.rows) seatSeen.partial = b; }
+    if (seatSeen.partial) await page.screenshot({ path: OUT + 'screenshot-seats.png' }); else await sleep(80);
+  }
+  ok('parked buses show a seat grid in rows of 4, one row of heads per boarded row', seatSeen.samples > 0 && !seatSeen.bad.length && seatSeen.partial, seatSeen);
   // sample the ring while buses load and the streams refill it
   const busyFrames = await sampleRing(40, 120); const m1 = motion(busyFrames, cz);
   ok('ring keeps circulating counter-clockwise while riders board and merge (no reverse moves)', m1.framePairs >= 5 && m1.ccw > 1000 && m1.cw === 0 && m1.still === 0, m1);
@@ -60,6 +68,11 @@ function motion(frames, cz) {
   await waitSettled();
   const after1 = await page.evaluate(() => ({ ...BusJam.stats(), waiting: BusJam.waitingRiders(), filled: BusJam.state.parked.map(p => p && p.filled) }));
   ok('riders step off the ring and board parked buses', after1.boards > before1.boards && after1.waiting < before1.waiting, { before: before1, after: after1 });
+  // v5: rows of 4
+  const rows4 = await page.evaluate(() => { const s = BusJam.state, C = BusJam.core; const uni = (a, f) => { for (let i = f; i < a.length; i += 4) { const r = Array.from(a.slice(i, i + 4)); if (r.length !== 4 || r.some(c => c !== r[0])) return false; } return true; };
+    const g = BusJam.boardGroups(); return { groups: g.length, sizes: [...new Set(g)], boards: s.boards, filled: s.parked.map(p => p && p.filled), ringRowsUniform: uni(s.ring, 0), streamRowsUniform: [0, 1].every(a => uni(s.streams[a], s.qi[a])), seatsX4: s.level.vehicles.every(v => v.seats % 4 === 0) }; });
+  ok('boarding happens a whole row of 4 at a time (every board group is 4, fills are multiples of 4)', rows4.groups > 0 && rows4.sizes.length === 1 && rows4.sizes[0] === 4 && rows4.boards % 4 === 0 && rows4.filled.every(f => f === null || f % 4 === 0), rows4);
+  ok('ring rows and stream rows are each one colour; all seat counts are multiples of 4', rows4.ringRowsUniform && rows4.streamRowsUniform && rows4.seatsX4, rows4);
   const mergedInRing = await page.evaluate(() => BusJam.ringSamples().filter(p => p.pid[0] === 's').length);
   ok('the upper streams feed the gaps in the ring', after1.merges > 0 && after1.streams[0] + after1.streams[1] < before1.streams[0] + before1.streams[1] && mergedInRing > 0, { merges: after1.merges, streamsBefore: before1.streams, streamsAfter: after1.streams, mergedRidersInRing: mergedInRing });
   // blocked vehicle does nothing
