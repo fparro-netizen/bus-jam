@@ -1,18 +1,20 @@
 // Bus Jam: rendering, animation, input, UI. Rules live in core.js.
-// Layout (world units, -z is up the screen): rider track at the top, parking row in the middle, diagonal jam below.
+// Layout (world units, -z is up the screen): two rider streams pour in from the top corners into a big ring of riders that
+// keeps circulating counter-clockwise; the parking row runs along the bottom of the ring; the jam of buses sits below.
 import * as THREE from './lib/three.module.min.js';
 import * as C from './core.js';
 import { LEVELS } from './levels.js';
 
 const $ = id => document.getElementById(id);
-// track
-const TM = -8.7, TA = 1.9, TR = 1.95, TTOP = -14.6, TBW = 2.05, LANES = [-0.8, -0.4, 0, 0.4, 0.8], ROW = 0.36;
-const MOUTH = [0, TM + TBW / 2 + 0.05];
+const { RING, ringPoint, cellU, SPOT_W, SPOT_N } = C;
+const RB = 0.62;                        // half width of the ring floor
+const S_LANES = [-0.54, -0.18, 0.18, 0.54], S_ORDER = [1, 2, 0, 3], SSTEP = C.RING_LEN / RING.rows / S_LANES.length;
+const TOP_Z = -15.6;                    // top of the view
 // parking
-const SPOT_W = 1.25, SPOT_N = -7.0, SPOT_S = -4.2, ROAD_Z = -3.65, PS = 0.95;
+const SPOT_S = -4.2, ROAD_Z = -3.65, PS = 0.95;
 // jam
 const JAM_TOP = -2.3, JAM_W = 11.8, THETA = Math.PI / 4;
-const SPEED = 16, WALK = 9, STAGGER = 0.04;
+const SPEED = 16, WALK = 6;
 const MYSTERY = '#c5cbd4';
 
 // ---------------- save ----------------
@@ -59,7 +61,6 @@ const Sound = (() => {
     click() { tone(800, 600, 0.05, 'sine', 0.08); },
   };
 })();
-
 // ---------------- three.js setup ----------------
 const canvas = $('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -114,7 +115,7 @@ function model(len, seats) {
 }
 
 // ---------------- people (instanced) ----------------
-const MAXP = 420;
+const MAXP = 520;
 const peopleBody = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.13, 0.16, 3, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAXP);
 const peopleHead = new THREE.InstancedMesh(new THREE.SphereGeometry(0.115, 10, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAXP);
 for (const m of [peopleBody, peopleHead]) { m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.frustumCulled = false; m.castShadow = true; m.count = 0; for (let i = 0; i < MAXP; i++) m.setColorAt(i, tmpC.set('#ffffff')); scene.add(m); }
@@ -125,25 +126,9 @@ const MAXD = 260;
 const dustMesh = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(0.12, 0), new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.75, depthWrite: false }), MAXD);
 dustMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); dustMesh.frustumCulled = false; dustMesh.count = 0; scene.add(dustMesh);
 let dust = [];
-
-// ---------------- track geometry ----------------
-const ARC = Math.PI * TR / 2, SIDE_LEN = TA + ARC + (TM - TR - TTOP);
-function trackPoint(s, side, off = 0) { // side -1 left, +1 right; off = lateral offset (+ = outside of the U)
-  let x, z, nx, nz;
-  if (s <= TA) { x = side * s; z = TM; nx = 0; nz = 1; }
-  else if (s <= TA + ARC) { const f = (s - TA) / TR; x = side * (TA + TR * Math.sin(f)); z = TM - TR + TR * Math.cos(f); nx = side * Math.sin(f); nz = Math.cos(f); }
-  else { x = side * (TA + TR); z = TM - TR - (s - TA - ARC); nx = side; nz = 0; }
-  return [x + nx * off, z + nz * off];
-}
-// Each arm of the track is one line of riders. Rider k of an arm stands k*STEP from the bottom-centre front, in a fixed lane,
-// so when the front rider leaves everyone only steps forward (down the arm, then toward the centre). Nobody changes lane.
-const STEP = ROW / LANES.length, KVIS = Math.floor((SIDE_LEN - 0.1) / STEP);
-const LANE_ORDER = [2, 0, 3, 1, 4];
-function armTarget(arm, k, lane) { const side = arm === 0 ? -1 : 1; return trackPoint(0.3 + Math.min(k, KVIS + 14) * STEP, side, LANES[lane]); }
-
 // ---------------- static world ----------------
 let world = null;
-function buildWorld(lv, CS, lotCenter) {
+function buildWorld(lv, CS) {
   if (world) { scene.remove(world); world.traverse(o => { if (o.geometry && o.userData.own) o.geometry.dispose(); }); }
   world = new THREE.Group(); scene.add(world);
   const own = m => { m.userData.own = true; return m; };
@@ -156,52 +141,60 @@ function buildWorld(lv, CS, lotCenter) {
   plane(13, SPOT_S - SPOT_N + 1.5, lam('#5b616c'), 0, (SPOT_N + SPOT_S) / 2 + 0.35, 0.002);
   const curb = (w, d, x, z, h = 0.08, c = '#f4f6f9') => { const m = own(new THREE.Mesh(box(w, h, d), lam(c))); m.position.set(x, h / 2, z); m.receiveShadow = true; m.castShadow = true; world.add(m); return m; };
   curb(13, 0.12, 0, ROAD_Z + 0.68);
-  curb(13, 0.1, 0, SPOT_N - 0.4, 0.06);
   for (let i = 0; i < 8; i++) {
-    const x = (i - 3.5) * SPOT_W; const vip = i === 0;
+    const x = C.spotX(i); const vip = i === 0;
     const m = own(new THREE.Mesh(box(SPOT_W - 0.16, 0.012, SPOT_S - SPOT_N - 0.1), lam(vip ? '#e9b949' : '#6c737f'))); m.position.set(x, 0.006, (SPOT_N + SPOT_S) / 2); m.receiveShadow = true; world.add(m);
     const edge = own(new THREE.Mesh(box(SPOT_W - 0.06, 0.008, SPOT_S - SPOT_N), lam(vip ? '#f7d774' : '#8a919c'))); edge.position.set(x, 0.003, (SPOT_N + SPOT_S) / 2); world.add(edge);
   }
   const vipTex = canvasTex(128, 64, (x, w, h) => { x.fillStyle = '#b07d10'; x.font = '900 46px -apple-system, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('VIP', w / 2, h / 2 + 2); });
-  const vip = own(new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.45).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: vipTex, transparent: true }))); vip.position.set(-3.5 * SPOT_W, 0.02, SPOT_S - 0.45); vip.rotation.y = 0; world.add(vip);
-  // chute from the track mouth to the parking row
-  plane(0.7, SPOT_N - MOUTH[1] + 0.4, lam('#eef1f5'), 0, (SPOT_N + MOUTH[1]) / 2 - 0.2, 0.004);
-  // rider track: floor ribbon + white walls
-  const ribbon = (offA, offB, y, mat, h = 0) => {
-    const pos = [], idx = []; const N = 80;
-    for (const side of [-1, 1]) {
-      const base = pos.length / 3;
-      for (let i = 0; i <= N; i++) { const s = (SIDE_LEN + 1.5) * i / N; const a = trackPoint(s, side, offA), b = trackPoint(s, side, offB); pos.push(a[0], y, a[1], b[0], y, b[1]); }
-      for (let i = 0; i < N; i++) { const a = base + i * 2; side < 0 ? idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3) : idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
-    }
+  const vip = own(new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.45).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ map: vipTex, transparent: true }))); vip.position.set(C.spotX(0), 0.02, SPOT_S - 0.45); world.add(vip);
+  // ribbons (track floors)
+  const ribbon = (pointAt, len, N, offA, offB, y, mat) => {
+    const pos = [], idx = [];
+    for (let i = 0; i <= N; i++) { const s = len * i / N; const a = pointAt(s, offA), b = pointAt(s, offB); pos.push(a[0], y, a[1], b[0], y, b[1]); }
+    for (let i = 0; i < N; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
     const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals();
     const m = own(new THREE.Mesh(g, mat)); m.receiveShadow = true; world.add(m); return m;
   };
-  ribbon(-TBW / 2, TBW / 2, 0.01, lam('#f1f3f6', { side: THREE.DoubleSide }));
-  const segs = [];
-  for (const off of [-TBW / 2 - 0.06, TBW / 2 + 0.06]) for (const side of [-1, 1]) for (let s = 0; s < SIDE_LEN + 1.5; s += 0.3) {
-    if (off > 0 && s < 0.45) continue; // opening at the mouth, where riders leave the track
-    const a = trackPoint(s, side, off), b = trackPoint(s + 0.3, side, off); segs.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, Math.atan2(b[0] - a[0], b[1] - a[1]), Math.hypot(b[0] - a[0], b[1] - a[1]) + 0.04]);
+  const floorM = lam('#f1f3f6', { side: THREE.DoubleSide });
+  const streamAt = a => (s, off) => { const [x, z, tx, tz] = samplePath(streamPaths[a], s); const l = Math.hypot(tx, tz) || 1; return [x - tz / l * off, z + tx / l * off]; };
+  ribbon((s, off) => ringPoint(s, off), C.RING_LEN, 180, -RB, RB, 0.01, floorM);
+  for (const a of [0, 1]) ribbon(streamAt(a), streamPaths[a].len, 90, -0.76, 0.76, 0.012, floorM);
+  // walls: inner ring wall all round, outer wall on the upper half (open at the stream joins), low curb along the bottom
+  const segs = [], lows = [];
+  const joinU = C.JOIN_CELL.map(c => cellU(c));
+  const cyc = (u, v) => { const d = Math.abs(u - v) % C.RING_LEN; return Math.min(d, C.RING_LEN - d); };
+  for (let u = 0; u < C.RING_LEN; u += 0.3) for (const off of [-RB - 0.07, RB + 0.07]) {
+    const a = ringPoint(u, off), b = ringPoint(u + 0.3, off); const seg = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, Math.atan2(b[0] - a[0], b[1] - a[1]), Math.hypot(b[0] - a[0], b[1] - a[1]) + 0.04];
+    if (off < 0) segs.push(seg);
+    else if (joinU.some(j => cyc(u + 0.15, j) < 1.0)) continue;
+    else if (seg[1] > RING.cz + 0.4) lows.push(seg); else segs.push(seg);
   }
-  const walls = own(new THREE.InstancedMesh(new THREE.BoxGeometry(0.13, 0.26, 1), lam('#ffffff'), segs.length)); walls.castShadow = true; walls.receiveShadow = true;
-  segs.forEach(([x, z, r, l], i) => { tmpQ.setFromAxisAngle(YAX, r); walls.setMatrixAt(i, tmpM.compose(tmpP.set(x, 0.13, z), tmpQ, tmpS.set(1, 1, l))); });
-  world.add(walls);
-  // gap in the inner (bottom) wall at the mouth is where riders leave: mark it
-  const gate = own(new THREE.Mesh(box(0.8, 0.04, 0.16), lam('#ffd23f'))); gate.position.set(0, 0.03, MOUTH[1] - 0.02); world.add(gate);
-  // island inside the U
-  const isl = own(new THREE.Mesh(new THREE.BoxGeometry(2 * (TA + TR - TBW / 2 - 0.2), 0.14, TM - TBW / 2 - 0.2 - (TTOP - 1)), lam('#d3d8e0'))); isl.position.set(0, 0.07, (TM - TBW / 2 - 0.2 + TTOP - 1) / 2); isl.receiveShadow = true; world.add(isl);
+  for (const a of [0, 1]) for (let s = 0.45; s < streamPaths[a].len; s += 0.3) for (const off of [-0.83, 0.83]) {
+    const f = streamAt(a); const p = f(s, off), q = f(s + 0.3, off); segs.push([(p[0] + q[0]) / 2, (p[1] + q[1]) / 2, Math.atan2(q[0] - p[0], q[1] - p[1]), Math.hypot(q[0] - p[0], q[1] - p[1]) + 0.04]);
+  }
+  const mkWalls = (list, h, col) => {
+    const walls = own(new THREE.InstancedMesh(new THREE.BoxGeometry(0.13, h, 1), lam(col), list.length)); walls.castShadow = true; walls.receiveShadow = true;
+    list.forEach(([x, z, r, l], i) => { tmpQ.setFromAxisAngle(YAX, r); walls.setMatrixAt(i, tmpM.compose(tmpP.set(x, h / 2, z), tmpQ, tmpS.set(1, 1, l))); }); world.add(walls);
+  };
+  mkWalls(segs, 0.26, '#ffffff'); mkWalls(lows, 0.06, '#ffd23f');
+  // raised island inside the ring
+  const sh = new THREE.Shape(); for (let i = 0; i <= 120; i++) { const p = ringPoint(C.RING_LEN * i / 120, -RB - 0.14); i ? sh.lineTo(p[0], -p[1]) : sh.moveTo(p[0], -p[1]); }
+  const isl = own(new THREE.Mesh(new THREE.ExtrudeGeometry(sh, { depth: 0.14, bevelEnabled: false }).rotateX(-Math.PI / 2), lam('#d3d8e0'))); isl.receiveShadow = true; world.add(isl);
   // lamp posts and shrubs
   const poleM = lam('#8b95a5'), headM = lam('#5f6b7c'), bulbM = new THREE.MeshBasicMaterial({ color: '#fff6c8' });
   const lamp = (x, z, dir) => { const g = new THREE.Group(); const p = own(new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 1.6, 8), poleM)); p.position.y = 0.8; p.castShadow = true;
     const arm = own(new THREE.Mesh(box(0.55, 0.06, 0.08), headM)); arm.position.set(dir * 0.25, 1.58, 0); const hd = own(new THREE.Mesh(box(0.26, 0.08, 0.16), headM)); hd.position.set(dir * 0.5, 1.55, 0);
     const b = own(new THREE.Mesh(box(0.2, 0.02, 0.1), bulbM)); b.position.set(dir * 0.5, 1.5, 0); g.add(p, arm, hd, b); g.position.set(x, 0, z); world.add(g); };
-  lamp(-5.9, -7.6, 1); lamp(5.9, -7.6, -1); lamp(-6.0, 1.5, 1); lamp(6.0, 1.5, -1);
+  lamp(-5.9, -7.7, 1); lamp(5.9, -7.7, -1); lamp(-6.0, 1.5, 1); lamp(6.0, 1.5, -1);
   const shrubG = own(new THREE.IcosahedronGeometry(0.34, 1)), shrubM = lam('#7cc243'), potM = lam('#c9ced6');
   const shrub = (x, z) => { const pot = own(new THREE.Mesh(box(0.56, 0.18, 0.56), potM)); pot.position.set(x, 0.09, z); const s = new THREE.Mesh(shrubG, shrubM); s.position.set(x, 0.42, z); s.castShadow = true; world.add(pot, s); };
-  shrub(-6.1, -6.0); shrub(6.1, -6.0); shrub(-6.1, -9.6); shrub(6.1, -9.6); shrub(-6.2, 5); shrub(6.2, 5);
-  // faint outline of the jam area
-  const jw = lv.w + 0.6, jh = lv.h + 0.6; const pad = own(new THREE.Mesh(new THREE.PlaneGeometry(jw, jh).rotateX(-Math.PI / 2), lam('#d7dbe2')));
-  pad.scale.setScalar(CS); pad.position.set(lotCenter[0], 0.001, lotCenter[1]); pad.rotation.y = THETA; pad.receiveShadow = true; world.add(pad);
+  shrub(-6.1, -6.0); shrub(6.1, -6.0); shrub(-6.1, -10.4); shrub(6.1, -10.4); shrub(-6.2, 5); shrub(6.2, 5); shrub(0, -10.0);
+  // the jam's outline: one tile per cell of its shape
+  const mask = C.maskOf(lv.w, lv.h, lv.shape); const n = mask.reduce((a, b) => a + b, 0);
+  const tiles = own(new THREE.InstancedMesh(new THREE.BoxGeometry(1.06, 0.02, 1.06), lam('#d3d8df'), n)); tiles.receiveShadow = true; let ti = 0;
+  for (let y = 0; y < lv.h; y++) for (let x = 0; x < lv.w; x++) if (mask[y * lv.w + x]) { tmpM.compose(tmpP.set(x + 0.5 - lv.w / 2, 0, y + 0.5 - lv.h / 2), tmpQ.identity(), tmpS.set(1, 1, 1)); tmpM2.multiplyMatrices(lotFrame.matrixWorld, tmpM); tiles.setMatrixAt(ti++, tmpM2); }
+  world.add(tiles);
 }
 
 // spot badges (seats left)
@@ -220,25 +213,27 @@ function setBadge(i, n, color) {
   x.strokeStyle = 'rgba(255,255,255,.9)'; x.lineWidth = 4; x.stroke();
   x.fillStyle = '#fff'; x.font = '900 40px -apple-system, Arial, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(String(n), 64, 35); b.t.needsUpdate = true;
 }
-
 // ---------------- game state ----------------
 let levelIdx = 0, state = null, undoStack = [], mode = 'title';
 let CS = 0.7; const lotFrame = new THREE.Object3D(); let lotInv = new THREE.Matrix4();
-let V = [];             // vehicle visuals
-let arms = [[], []];    // riders still waiting in each arm of the track, front first
+let V = [];               // vehicle visuals
+let ringVis = [];         // one entry per ring slot: rider visual or null
+let streamVis = [[], []]; // riders queued in each stream, front first
 let walkers = [];
 let sched = [];
-let now = 0;
-let spotFreeAt = new Array(8).fill(0), gateFreeAt = 0;
-let pendingCheck = false, revealed = [];
+let now = 0, tickAcc = 0, stuckTicks = 0, endChecked = false;
+let revealed = [];
 
-const sx = i => (i - 3.5) * SPOT_W;
+const sx = C.spotX;
 const cellLocal = v => { const [dx, dy] = C.DIRS[v.dir]; const lv = state.level; return [v.x + 0.5 - lv.w / 2 - dx * (v.len - 1) / 2, v.y + 0.5 - lv.h / 2 - dy * (v.len - 1) / 2]; };
 const toWorld = (lx, lz) => { tmpP.set(lx, 0, lz).applyMatrix4(lotFrame.matrixWorld); return [tmpP.x, tmpP.z]; };
 const headingOf = (dx, dz) => Math.atan2(-dx, -dz);
 const parkZ = vid => SPOT_N + 0.12 + model(state.level.vehicles[vid].len, state.level.vehicles[vid].seats).Lm * PS / 2;
 const at = (t, fn) => { sched.push({ t, fn }); };
 const vColor = vid => (state.level.vehicles[vid].m && !revealed[vid]) ? MYSTERY : C.COLORS[state.colors[vid]];
+// where ring slot `slot` is drawn right now (the drawing trails the rules by half a row so boarding happens as riders arrive)
+const ringPhase = () => state.rot + tickAcc - 0.5;
+function slotPos(slot, ph = ringPhase()) { const r = Math.floor(slot / C.LANES_N), l = slot % C.LANES_N; return ringPoint(cellU(r + ph), RING.lanes[l]); }
 
 function fillet(pts, r) {
   if (pts.length < 3) return pts;
@@ -280,28 +275,46 @@ function exitPath(vid, spot) {
   // distance at which the vehicle leaves the jam area (starts growing to parking size)
   const lp = mkPath(clean.slice(0, Math.min(clean.length, lotPart))); path.growFrom = Math.min(path.len - 0.5, lp.len); return path;
 }
+// ---------------- ring + stream geometry ----------------
+const ROWLEN = C.RING_LEN / RING.rows;
+// stream a (0 left, 1 right): from the ring's outer edge at its join cell up and out to the top corner
+const streamPaths = [0, 1].map(a => {
+  const side = a ? 1 : -1; const P0 = ringPoint(cellU(C.JOIN_CELL[a]), RB - 0.05);
+  return mkPath(fillet([[P0[0], P0[1]], [P0[0], -13.3], [side * 4.75, -15.1], [side * 4.75, -24]], 1.1));
+});
+const SVIS = [0, 1].map(a => { let d = 0; while (d < streamPaths[a].len && samplePath(streamPaths[a], d)[1] > TOP_Z - 0.8) d += 0.05; return Math.floor(d / SSTEP); });
+function streamTarget(a, k, lane) {
+  const p = streamPaths[a]; const d = 0.12 + Math.min(k, SVIS[a] + 10) * SSTEP; const [x, z, tx, tz] = samplePath(p, d); const l = Math.hypot(tx, tz) || 1;
+  return [x + (-tz / l) * S_LANES[lane], z + (tx / l) * S_LANES[lane]];
+}
 
 // ---------------- scene sync ----------------
+let riderSerial = 0;
 function syncScene(pop) {
-  walkers = []; sched = []; spotFreeAt.fill(0); gateFreeAt = 0; dust = [];
-  const lv = state.level; const old = V; V = [];
+  walkers = []; sched = []; dust = [];
+  const lv = state.level; V = [];
   lv.vehicles.forEach((v, i) => {
-    const vis = { vid: i, mode: 'gone', x: 0, z: 0, rot: 0, s: CS, readyAt: 0, lastBoard: 0, filled: 0, bump: -9, pop: pop ? now + Math.random() * 0.15 : -9, dustT: 0, flash: -9 };
+    const vis = { vid: i, mode: 'gone', x: 0, z: 0, rot: 0, s: CS, lastBoard: 0, filled: 0, bump: -9, pop: pop ? now + Math.random() * 0.15 : -9, dustT: 0, flash: -9 };
     V[i] = vis;
     if (state.inLot[i]) { const [lx, lz] = cellLocal(v); const [dx, dy] = C.DIRS[v.dir]; [vis.x, vis.z] = toWorld(lx, lz); vis.rot = headingOf(dx, dy) + THETA; vis.mode = 'lot'; }
   });
   for (let k = 0; k < 8; k++) setBadge(k, null);
   state.parked.forEach((p, k) => {
-    if (!p) return; const vis = V[p.vid]; vis.mode = 'parked'; vis.filled = p.filled; vis.spot = k; vis.x = sx(k); vis.z = parkZ(p.vid); vis.rot = 0; vis.s = PS;
+    if (!p) return; const vis = V[p.vid];
+    if (p.full) { vis.mode = 'gone'; return; }
+    vis.mode = 'parked'; vis.filled = p.filled; vis.spot = k; vis.x = sx(k); vis.z = parkZ(p.vid); vis.rot = 0; vis.s = PS;
     setBadge(k, C.seatsOf(state, p.vid) - p.filled, C.COLORS[state.colors[p.vid]]);
   });
   updateReveals(false);
-  arms = [0, 1].map(a => state.queues[a].slice(state.qi[a]).map((c, k) => {
-    const lane = LANE_ORDER[k % LANE_ORDER.length]; const t = armTarget(a, k, lane);
-    return { pid: a + ':' + (state.qi[a] + k), arm: a, lane, color: c, x: t[0], z: t[1], s: pop ? 0.01 : 1, born: now + (pop ? Math.min(k, KVIS) * 0.004 : 0) };
+  ringVis = Array.from(state.ring, (c, slot) => c < 0 ? null : { pid: 'r' + (riderSerial++), color: c, x: 0, z: 0, mt0: -9 });
+  streamVis = [0, 1].map(a => state.streams[a].slice(state.qi[a]).map((c, k) => {
+    const idx = state.qi[a] + k; const lane = S_ORDER[idx % S_ORDER.length]; const t = streamTarget(a, k, lane);
+    return { pid: 's' + a + ':' + idx, color: c, lane, x: t[0], z: t[1], s: pop ? 0.01 : 1, born: now + (pop ? Math.min(k, SVIS[a]) * 0.004 : 0) };
   }));
+  stuckTicks = 0; endChecked = false;
   updateHud();
 }
+
 function updateReveals(anim) {
   const g = C.grid(state);
   state.level.vehicles.forEach((v, i) => {
@@ -309,47 +322,59 @@ function updateReveals(anim) {
     if (!state.inLot[i] || C.firstBlocker(state, i, g) === -1) { revealed[i] = true; if (anim && V[i]) { V[i].pop = now; Sound.reveal(); } }
   });
 }
-
 // ---------------- events from rules -> animation ----------------
 function playEvents(events) {
   for (const e of events) {
     const vis = V[e.vid];
     if (e.type === 'exit') {
-      const path = exitPath(e.vid, e.spot); const start = Math.max(now, spotFreeAt[e.spot]); const T = path.len / SPEED + 0.3;
-      spotFreeAt[e.spot] = Infinity; vis.readyAt = start + T; vis.lastBoard = vis.readyAt; vis.spot = e.spot; vis.mode = 'waitDrive'; vis.filled = 0;
-      at(start, () => { vis.mode = 'drive'; vis.path = path; vis.t0 = now; vis.T = T; Sound.go(); });
-      at(start + T, () => { vis.mode = 'parked'; vis.x = sx(e.spot); vis.z = parkZ(e.vid); vis.rot = 0; vis.s = PS; vis.squash = now; setBadge(e.spot, C.seatsOf(state, e.vid) - vis.filled, C.COLORS[state.colors[e.vid]]); });
+      const path = exitPath(e.vid, e.spot); const T = path.len / SPEED + 0.3;
+      vis.spot = e.spot; vis.filled = 0; vis.lastBoard = now + T;
+      vis.mode = 'drive'; vis.path = path; vis.t0 = now; vis.T = T; Sound.go();
+      at(now + T, () => { vis.mode = 'parked'; vis.x = sx(e.spot); vis.z = parkZ(e.vid); vis.rot = 0; vis.s = PS; vis.squash = now; setBadge(e.spot, C.seatsOf(state, e.vid) - vis.filled, C.COLORS[state.colors[e.vid]]); });
     } else if (e.type === 'board') {
-      const door = [sx(e.spot), SPOT_N + 0.05]; const mid = [sx(e.spot) * 0.85, SPOT_N - 0.35];
-      const dist = Math.hypot(mid[0] - MOUTH[0], mid[1] - MOUTH[1]) + Math.hypot(door[0] - mid[0], door[1] - mid[1]); const T = 0.25 + dist / WALK;
-      const t = Math.max(now, gateFreeAt, vis.readyAt - T + 0.1); gateFreeAt = t + STAGGER;
-      vis.lastBoard = Math.max(vis.lastBoard, t + T);
+      const p = ringVis[e.slot]; ringVis[e.slot] = null;
+      const from = p ? [p.x, p.z] : slotPos(e.slot); const door = [sx(e.spot), SPOT_N + 0.05];
+      const mid = [from[0] * 0.5 + door[0] * 0.5, Math.max(from[1], door[1] - 0.35)];
+      const T = 0.1 + (Math.hypot(mid[0] - from[0], mid[1] - from[1]) + Math.hypot(door[0] - mid[0], door[1] - mid[1])) / WALK;
+      const w = { p: p || { color: e.color }, pts: [from, mid, door], t0: now, T }; walkers.push(w);
+      vis.lastBoard = Math.max(vis.lastBoard, now + T);
       const n = e.filled, seats = C.seatsOf(state, e.vid), color = C.COLORS[e.color];
-      at(t, () => {
-        const line = arms[e.arm], pid = e.arm + ':' + e.idx; const i = line.findIndex(p => p.pid === pid);
-        const p = i >= 0 ? line.splice(i, 1)[0] : { pid, color: e.color, x: MOUTH[0], z: MOUTH[1], s: 1 };
-        walkers.push({ p, pts: [[p.x, p.z], [MOUTH[0] + (e.arm ? 0.12 : -0.12), MOUTH[1] - 0.05], mid, door], t0: now, T });
-        updateHud();
-      });
-      at(t + T, () => { walkers = walkers.filter(w => w.p.pid !== e.arm + ':' + e.idx); vis.filled = Math.max(vis.filled, n); vis.squash = now; if (vis.mode === 'parked') setBadge(e.spot, seats - vis.filled, color); Sound.board(n); });
+      at(now + T, () => { walkers = walkers.filter(x => x !== w); vis.filled = Math.max(vis.filled, n); vis.squash = now; if (vis.mode === 'parked') setBadge(e.spot, seats - vis.filled, color); Sound.board(n); });
+      updateHud();
     } else if (e.type === 'depart') {
-      const t0 = Math.max(vis.readyAt, vis.lastBoard) + 0.15;
+      const t0 = Math.max(now, vis.lastBoard) + 0.15;
       at(t0, () => { vis.mode = 'depart'; vis.t0 = now; vis.spot = e.spot; setBadge(e.spot, null); Sound.full(); });
       at(t0 + 0.12, () => Sound.depart());
-      spotFreeAt[e.spot] = t0 + 0.55;
+    } else if (e.type === 'merge') {
+      const line = streamVis[e.arm]; const front = line.length && line[0].pid === 's' + e.arm + ':' + e.idx ? line.shift() : null;
+      ringVis[e.slot] = { pid: front ? front.pid : 's' + e.arm + ':' + e.idx, color: e.color, x: 0, z: 0, from: front ? [front.x, front.z] : null, mt0: now };
     }
   }
 }
-function isIdle() { return sched.length === 0 && walkers.length === 0 && !V.some(v => v && (v.mode === 'drive' || v.mode === 'depart' || v.mode === 'waitDrive')); }
+function isIdle() { return sched.length === 0 && walkers.length === 0 && !V.some(v => v && (v.mode === 'drive' || v.mode === 'depart')); }
+// the ring has nothing more to do until the player taps again (exactly where the solver's model says it settles)
+function settled() {
+  if (!isIdle()) return false; const m = C.toMacro(state);
+  if (m.qi[0] !== state.qi[0] || m.qi[1] !== state.qi[1]) return false;
+  return state.parked.every((p, k) => (!p || p.full) ? !m.parked[k] : (m.parked[k] && m.parked[k].filled === p.filled));
+}
 
-// ---------------- per-frame update ----------------
 function spawnDust(x, z, rot, s) {
   if (dust.length >= MAXD) dust.shift();
   const bx = Math.sin(rot) * 0.9 * s, bz = Math.cos(rot) * 0.9 * s; // behind the vehicle (forward is -z rotated)
   dust.push({ x: x + bx + (Math.random() - 0.5) * 0.3 * s, z: z + bz + (Math.random() - 0.5) * 0.3 * s, t0: now, life: 0.55 + Math.random() * 0.35, r: 0.6 + Math.random() * 0.8 });
 }
+// ---------------- per-frame update ----------------
+function tickRules() {
+  const ev = C.step(state); if (ev.length) playEvents(ev);
+  if (mode === 'play') {
+    if (C.isStuck(state)) { if (++stuckTicks === RING.rows) showStuck(); }  // after one full turn of the ring with nothing to board
+    else { if (stuckTicks >= RING.rows) hideOverlay(); stuckTicks = 0; }
+  }
+}
 function update(dt) {
   now += dt;
+  if (state) { tickAcc += dt * C.TICK_RATE; while (tickAcc >= 1) { tickAcc -= 1; tickRules(); } }
   if (sched.length) { sched.sort((a, b) => a.t - b.t); while (sched.length && sched[0].t <= now) sched.shift().fn(); }
   const cnt = { body: 0, roof: 0, glass: 0, wheel: 0, arrow: 0, q: 0 };
   for (const vis of V) {
@@ -391,22 +416,28 @@ function update(dt) {
   }
   for (const k in cnt) { const m = IM[k]; m.count = cnt[k]; m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
 
-  // riders
-  let n = 0; const lerpK = 1 - Math.exp(-dt * 10);
-  for (let a = 0; a < 2; a++) { const line = arms[a]; const lim = Math.min(line.length, KVIS + 14);
-  for (let k = 0; k < lim; k++) {
-    const p = line[k]; const tgt = armTarget(a, k, p.lane);
-    const dx = tgt[0] - p.x, dz = tgt[1] - p.z; const moving = dx * dx + dz * dz > 0.0004; p.x += dx * lerpK; p.z += dz * lerpK;
-    if (p.s < 1 && now > p.born) p.s = Math.min(1, p.s + dt * 6);
-    if (k >= KVIS || n >= MAXP) continue;
-    const bob = moving ? Math.abs(Math.sin(now * 14 + k * 0.9)) * 0.05 : 0;
-    setPerson(n++, p.x, bob, p.z, p.color, p.s);
-  } }
+  // riders: the ring (always circulating), the two streams, and riders walking to their bus
+  let n = 0; const lerpK = 1 - Math.exp(-dt * 10); const ph = ringPhase();
+  for (let slot = 0; slot < ringVis.length; slot++) {
+    const p = ringVis[slot]; if (!p) continue;
+    let [x, z] = slotPos(slot, ph);
+    const mk = (now - p.mt0) / 0.35; if (mk < 1 && p.from) { const e = ease(mk); x = p.from[0] + (x - p.from[0]) * e; z = p.from[1] + (z - p.from[1]) * e; }
+    p.x = x; p.z = z;
+    if (n < MAXP) setPerson(n++, x, Math.abs(Math.sin(now * 13 + slot * 0.7)) * 0.05, z, p.color, 1);
+  }
+  for (let a = 0; a < 2; a++) { const line = streamVis[a]; const lim = Math.min(line.length, SVIS[a] + 10);
+    for (let k = 0; k < lim; k++) {
+      const p = line[k]; const tgt = streamTarget(a, k, p.lane);
+      const dx = tgt[0] - p.x, dz = tgt[1] - p.z; const moving = dx * dx + dz * dz > 0.0004; p.x += dx * lerpK; p.z += dz * lerpK;
+      if (p.s < 1 && now > p.born) p.s = Math.min(1, p.s + dt * 6);
+      if (k >= SVIS[a] || n >= MAXP) continue;
+      setPerson(n++, p.x, moving ? Math.abs(Math.sin(now * 14 + k * 0.9)) * 0.05 : 0, p.z, p.color, p.s);
+    } }
   for (const w of walkers) {
     const k = Math.min(1, (now - w.t0) / w.T); const segs = w.pts; let L = 0; const ls = []; for (let i = 1; i < segs.length; i++) { const l = Math.hypot(segs[i][0] - segs[i - 1][0], segs[i][1] - segs[i - 1][1]); ls.push(l); L += l; }
     let d = L * k, i = 0; while (i < ls.length - 1 && d > ls[i]) { d -= ls[i]; i++; } const f = ls[i] ? Math.min(1, d / ls[i]) : 1;
     const x = segs[i][0] + (segs[i + 1][0] - segs[i][0]) * f, z = segs[i][1] + (segs[i + 1][1] - segs[i][1]) * f;
-    const bob = Math.abs(Math.sin(now * 16 + w.t0 * 7)) * 0.06; const s = k > 0.9 ? 0.4 + (1 - k) * 6 : 1;
+    const bob = Math.abs(Math.sin(now * 16 + w.t0 * 7)) * 0.06; const s = k > 0.85 ? 0.4 + (1 - k) * 4 : 1;
     if (n < MAXP) setPerson(n++, x, bob, z, w.p.color, s);
   }
   peopleBody.count = n; peopleHead.count = n;
@@ -417,15 +448,15 @@ function update(dt) {
   for (const p of dust) { const k = (now - p.t0) / p.life; const sc = p.r * (0.6 + k * 1.4) * (1 - k * k); tmpS.set(sc, sc, sc); tmpP.set(p.x, 0.08 + k * 0.25, p.z); tmpQ.identity(); tmpM.compose(tmpP, tmpQ, tmpS); dustMesh.setMatrixAt(dn++, tmpM); }
   dustMesh.count = dn; dustMesh.instanceMatrix.needsUpdate = true;
 
-  if (pendingCheck && isIdle()) { pendingCheck = false; checkEnd(); }
+  if (mode === 'play' && !endChecked && C.isWon(state) && isIdle()) { endChecked = true; checkEnd(); }
 }
+
 const WHITE = new THREE.Color('#ffffff');
 function setPerson(i, x, y, z, color, s) {
   tmpQ.identity(); tmpS.set(s, s, s); tmpP.set(x, 0.24 * s + y, z); tmpM.compose(tmpP, tmpQ, tmpS); peopleBody.setMatrixAt(i, tmpM);
   tmpP.set(x, 0.52 * s + y, z); tmpM.compose(tmpP, tmpQ, tmpS); peopleHead.setMatrixAt(i, tmpM);
   peopleBody.setColorAt(i, tmpC.set(C.COLORS[color])); peopleHead.setColorAt(i, headColors[color]);
 }
-
 // ---------------- camera fit ----------------
 let jamBottom = 9;
 function fitCamera() {
@@ -434,7 +465,7 @@ function fitCamera() {
   const barTop = $('bar').classList.contains('hidden') ? h - 30 : $('bar').getBoundingClientRect().top - 4;
   const top = Math.max(hudTop, 50), bottom = Math.max(30, h - barTop);
   const a = THREE.MathUtils.degToRad(54);
-  const zMin = TTOP + 0.6, zMax = jamBottom + 0.3, cz = (zMin + zMax) / 2;
+  const zMin = TOP_Z, zMax = jamBottom + 0.3, cz = (zMin + zMax) / 2;
   camera.position.set(0, Math.sin(a) * 60, cz + Math.cos(a) * 60); camera.lookAt(0, 0, cz); camera.updateMatrixWorld();
   const xs = [], ys = []; const inv = camera.matrixWorldInverse; const xm = 5.5;
   for (const x of [-xm, xm]) for (const y of [0, 0.8]) for (const z of [zMin, zMax]) { const p = new THREE.Vector3(x, y, z).applyMatrix4(inv); xs.push(p.x); ys.push(p.y); }
@@ -445,7 +476,6 @@ function fitCamera() {
   camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', () => fitCamera());
-
 // ---------------- input ----------------
 const ray = new THREE.Raycaster(); const ndc = new THREE.Vector2();
 let downAt = null;
@@ -473,7 +503,10 @@ function onTap(x, y) { const vid = pickVehicle(x, y); if (vid >= 0) tapVehicle(v
 function tapVehicle(vid) {
   if (mode !== 'play' || !state.inLot[vid]) return { ok: false, reason: 'gone' };
   const snap = C.snapshot(state);
-  const r = C.tap(state, vid);
+  // the bus can take riders once it has driven into its spot
+  const spot = C.freeSpot(state); let ready = state.tick;
+  if (spot >= 0 && C.firstBlocker(state, vid) === -1) ready = state.tick + Math.ceil((exitPath(vid, spot).len / SPEED + 0.3) * C.TICK_RATE) + 1;
+  const r = C.tap(state, vid, ready);
   if (!r.ok) {
     if (r.reason === 'blocked') { V[vid].bump = now; Sound.honk(); if (r.blocker >= 0 && V[r.blocker]) V[r.blocker].flash = now + 0.1; }
     else if (r.reason === 'full') { Sound.honk(); toast('All 8 spots are full'); }
@@ -483,20 +516,20 @@ function tapVehicle(vid) {
   hideHint(); playEvents(r.events); updateReveals(true); afterMove();
   return r;
 }
-function afterMove() { hideOverlay(); pendingCheck = true; updateHud(); }
+function afterMove() { hideOverlay(); stuckTicks = 0; endChecked = false; updateHud(); }
 
 // ---------------- boosters ----------------
 function doShuffle() {
   if (mode !== 'play' || C.isWon(state)) return; Sound.unlock();
   undoStack.push(C.snapshot(state));
-  const ev = C.shuffle(state, (Math.random() * 1e9) | 0);
-  Sound.shuffle(); syncScene(true); playEvents(ev); afterMove(); toast('Shuffled!');
+  const ok = C.shuffle(state, (Math.random() * 1e9) | 0);
+  Sound.shuffle(); syncScene(true); afterMove(); toast(ok ? 'Shuffled!' : 'Shuffled');
 }
 function doSort() {
   if (mode !== 'play') return; Sound.unlock();
-  if (!C.canSort(state)) { toast('Nobody in line fits a parked bus yet'); return; }
+  if (!C.canSort(state)) { toast('Nobody in the streams fits a parked bus yet'); return; }
   undoStack.push(C.snapshot(state));
-  const ev = C.sortQueue(state); Sound.shuffle(); syncScene(false); playEvents(ev); afterMove(); toast('Sorted the line');
+  C.sortQueue(state); Sound.shuffle(); syncScene(false); afterMove(); toast('Sorted the streams');
 }
 function doUndo() {
   if (mode !== 'play') return; Sound.click();
@@ -504,6 +537,7 @@ function doUndo() {
   C.restore(state, snap); state.undos++; syncScene(false); afterMove();
 }
 function doRestart() { if (mode !== 'play' && mode !== 'won') return; Sound.click(); startLevel(levelIdx); }
+
 
 // ---------------- flow ----------------
 function starsFor(s) { return s.boosters === 0 ? 3 : s.boosters <= 2 ? 2 : 1; }
@@ -520,24 +554,27 @@ function checkEnd() {
     }, 450);
     return;
   }
-  if (C.isStuck(state)) { $('stuck').classList.remove('hidden'); $('btn-shuffle').classList.add('pulse'); Sound.stuck(); }
 }
+function showStuck() { $('stuck').classList.remove('hidden'); $('btn-shuffle').classList.add('pulse'); Sound.stuck(); }
 function hideOverlay() { $('stuck').classList.add('hidden'); $('btn-shuffle').classList.remove('pulse'); }
 
 function setupLevel(i) {
   state = C.newState(LEVELS[i]); undoStack = []; revealed = [];
-  const lv = state.level; CS = Math.min(0.8, JAM_W * Math.SQRT2 / (lv.w + lv.h + 1.8));
-  const half = (lv.w + lv.h) / 2 * CS / Math.SQRT2; const center = [0, JAM_TOP + half + 0.9 * CS]; jamBottom = center[1] + half + 0.6;
+  const lv = state.level;
+  // fit the jam's actual outline (heart, circle, ...) between the parking row and the buttons
+  const mask = C.maskOf(lv.w, lv.h, lv.shape); let u0 = 1e9, u1 = -1e9, v0 = 1e9, v1 = -1e9;
+  for (let y = 0; y < lv.h; y++) for (let x = 0; x < lv.w; x++) if (mask[y * lv.w + x]) { const lx = x + 0.5 - lv.w / 2, lz = y + 0.5 - lv.h / 2; const u = (lx + lz) / Math.SQRT2, v = (lz - lx) / Math.SQRT2; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); }
+  CS = Math.min(0.8, JAM_W / (u1 - u0 + 1.6));
+  const center = [-CS * (u0 + u1) / 2, JAM_TOP + 0.35 - CS * (v0 - 0.8)]; jamBottom = center[1] + CS * (v1 + 0.8) + 0.3;
   lotFrame.position.set(center[0], 0, center[1]); lotFrame.rotation.set(0, THETA, 0); lotFrame.scale.setScalar(CS); lotFrame.updateMatrixWorld(true); lotInv = lotFrame.matrixWorld.clone().invert();
-  buildWorld(lv, CS, center); syncScene(false);
+  buildWorld(lv, CS); syncScene(false);
 }
 function startLevel(i) {
   levelIdx = i; save.last = i; persist(); mode = 'play';
   hideOverlay(); show(null); $('hud').classList.remove('hidden'); $('bar').classList.remove('hidden');
   setupLevel(i); fitCamera();
-  const hints = ['Tap a bus with a clear path to drive it to a spot. Matching riders hop on.', 'Full buses leave and free their spot. All 8 spots are yours, VIP too.', 'Stuck? Shuffle is free, unlimited, and always makes it solvable.'];
+  const hints = ['Tap a bus with a clear path to park it. Riders circling the ring hop on when they pass a bus of their colour.', 'Gaps in the ring fill from the two streams. Full buses leave and free their spot.', 'Stuck? Shuffle is free, unlimited, and always makes it solvable.'];
   if (i < hints.length) showHint(hints[i]); else hideHint();
-  pendingCheck = true;
 }
 function updateHud() {
   if (!state) return;
@@ -595,13 +632,18 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') window.addEve
 // test / debug hooks
 window.BusJam = {
   get state() { return state; }, get mode() { return mode; }, levels: LEVELS, core: C,
-  startLevel, tapVehicle, doShuffle, doSort, doUndo, doRestart, isIdle: () => isIdle(), openLevels,
+  startLevel, tapVehicle, doShuffle, doSort, doUndo, doRestart, isIdle: () => isIdle(), settled: () => settled(), openLevels,
   save: () => JSON.parse(localStorage.getItem(SAVE_KEY) || '{}'),
   screenOf(vid) { const v = state.level.vehicles[vid]; const [lx, lz] = cellLocal(v); const [x, z] = toWorld(lx, lz); const p = new THREE.Vector3(x, 0.45 * CS, z).project(camera); return { x: (p.x + 1) / 2 * window.innerWidth, y: (1 - p.y) / 2 * window.innerHeight }; },
   pick: (x, y) => pickVehicle(x, y),
   setSpeed: k => { speed = k; },
   solve: (fromCurrent) => C.solve(state.level, 400000, fromCurrent ? state : undefined),
-  visiblePeople: () => peopleBody.count, waitingRiders: () => arms[0].length + arms[1].length,
-  riderSamples: (n = 120) => arms.map(line => line.slice(0, n).map(p => ({ pid: p.pid, x: +p.x.toFixed(3), z: +p.z.toFixed(3) }))), walking: () => walkers.length,
-  info: () => ({ vehicles: state.level.vehicles.length, riders: state.queues[0].length + state.queues[1].length, colorsInJam: new Set(state.level.vehicles.map(v => v.color)).size, colorsInRiders: new Set(state.queues[0].concat(state.queues[1])).size, drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles }),
+  visiblePeople: () => peopleBody.count, waitingRiders: () => C.waiting(state),
+  ringSamples: () => ringVis.map((p, slot) => p && { pid: p.pid, slot, x: +p.x.toFixed(3), z: +p.z.toFixed(3), merging: now - p.mt0 < 0.4 }).filter(Boolean),
+  streamSamples: () => streamVis.map(line => line.slice(0, 60).map(p => ({ pid: p.pid, x: +p.x.toFixed(3), z: +p.z.toFixed(3) }))),
+  walking: () => walkers.length, stuckShown: () => !$('stuck').classList.contains('hidden'),
+  ringCentre: [0, RING.cz],
+  project: (x, z) => { const p = new THREE.Vector3(x, 0.4, z).project(camera); return { x: (p.x + 1) / 2 * window.innerWidth, y: (1 - p.y) / 2 * window.innerHeight }; },
+  stats: () => ({ tick: state.tick, boards: state.boards, merges: state.merges, ring: C.ringCount(state), streams: [C.streamLeft(state, 0), C.streamLeft(state, 1)] }),
+  info: () => { const lv = state.level; const ringC = lv.ring.filter(c => c >= 0); return { vehicles: lv.vehicles.length, shape: lv.shape, riders: ringC.length + lv.streams[0].length + lv.streams[1].length, ringRiders: ringC.length, colorsInJam: new Set(lv.vehicles.map(v => v.color)).size, colorsInRiders: new Set(ringC.concat(lv.streams[0], lv.streams[1])).size, drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles }; },
 };
